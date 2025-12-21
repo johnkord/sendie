@@ -1,0 +1,138 @@
+# Sendie - P2P File Transfer
+
+Secure, browser-based peer-to-peer file transfer using WebRTC.
+
+## Features
+
+- 🔒 **End-to-End Encrypted** - All transfers use DTLS encryption (built into WebRTC)
+- 👥 **Multi-Peer Sessions** - Share files with up to 10 people simultaneously
+- 🚀 **No Size Limits** - Transfer files of any size (limited only by browser/device)
+- 👤 **No Account Required** - Just create a session and share the link
+- ⚡ **Direct P2P** - Files transfer directly between browsers, never touch a server
+- 🔐 **Identity Verification** - SAS code comparison to verify each peer
+
+> **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files) but not anonymous (peers see each other's IPs). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work as it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for details.
+
+## Quick Start
+
+### Prerequisites
+
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [Node.js 18+](https://nodejs.org/)
+
+### Setup
+
+```bash
+# Install all dependencies
+# From VS Code: Run Task > setup
+
+# Or manually:
+cd server/Sendie.Server && dotnet restore
+cd client && npm install
+```
+
+### Running Locally
+
+**Option 1: VS Code Tasks**
+1. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac)
+2. Type "Tasks: Run Task"
+3. Select "run-all"
+
+**Option 2: VS Code Debug**
+1. Go to Run and Debug (Ctrl+Shift+D)
+2. Select "Launch Full Stack" from the dropdown
+3. Press F5
+
+**Option 3: Manual**
+
+Terminal 1 (Server):
+```bash
+cd server/Sendie.Server
+dotnet run
+```
+
+Terminal 2 (Client):
+```bash
+cd client
+npm run dev
+```
+
+Open http://localhost:5173 in your browser.
+
+## How It Works
+
+1. **Create a Session** - Click "Create New Session" to generate a unique session ID
+2. **Share the Link** - Send the session link to the people you want to share files with
+3. **Connect** - When they open the link, direct P2P connections are established (mesh topology)
+4. **Transfer** - Drag and drop files to broadcast them to all connected peers
+
+### Architecture
+
+```
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│  Browser A  │◄───────►│  Browser B  │◄───────►│  Browser C  │
+│   (Peer)    │         │   (Peer)    │         │   (Peer)    │
+└──────┬──────┘         └─────────────┘         └──────┬──────┘
+       │                       ▲                       │
+       │    WebRTC DataChannel │ (Full Mesh)           │
+       └───────────────────────┼───────────────────────┘
+                               │
+                     ┌─────────┴─────────┐
+                     │  Signaling Server │
+                     │   (C# / .NET 8)   │
+                     └───────────────────┘
+```
+
+- **Server**: Only handles signaling (session setup, ICE candidates)
+- **File Data**: Transfers directly between browsers via WebRTC
+- **Encryption**: DTLS encryption is automatic with WebRTC
+- **Topology**: Full mesh - each peer connects to all others (max ~10 peers)
+
+## Project Structure
+
+```
+sendie/
+├── server/                 # C# Backend
+│   └── Sendie.Server/
+│       ├── Program.cs      # Entry point & API endpoints
+│       ├── Hubs/           # SignalR hubs
+│       ├── Services/       # Business logic
+│       └── Models/         # Data models
+├── client/                 # TypeScript Frontend
+│   ├── src/
+│   │   ├── components/     # React components
+│   │   ├── services/       # WebRTC, Signaling, Crypto
+│   │   ├── stores/         # Zustand state management
+│   │   ├── pages/          # Route pages
+│   │   └── types/          # TypeScript types
+│   └── vite.config.ts
+├── docs/                   # Documentation
+└── .vscode/                # VS Code configuration
+    ├── launch.json         # Debug configurations
+    └── tasks.json          # Build/run tasks
+```
+
+## Technology Stack
+
+### Backend (C#)
+- .NET 8
+- ASP.NET Core Minimal API
+- SignalR for WebSocket communication
+
+### Frontend (TypeScript)
+- React 18
+- Vite
+- Tailwind CSS
+- Zustand (state management)
+- Web Crypto API
+
+## Security
+
+- **Transport Encryption**: WebRTC DataChannels use DTLS 1.2/1.3
+- **Identity Verification**: ECDSA key exchange with SAS code comparison
+- **No Data Storage**: Files never touch the server
+- **Session Isolation**: Each session is independent and ephemeral
+
+## License
+
+MIT
