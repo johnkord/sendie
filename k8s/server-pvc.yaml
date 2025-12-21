@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sendie-server-data
+  namespace: sendie
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: azurefile  # Use Azure Files instead of Azure Disk (no volume limit)
+  resources:
+    requests:
+      storage: 100Mi  # Azure Files minimum; billed by actual usage

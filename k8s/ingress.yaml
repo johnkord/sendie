@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sendie-ingress
+  namespace: sendie
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    # WebSocket support for SignalR
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - sendie.curlyquote.com
+      secretName: sendie-tls
+  rules:
+    - host: sendie.curlyquote.com
+      http:
+        paths:
+          # API and SignalR routes go to server
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: sendie-server
+                port:
+                  number: 80
+          - path: /hubs
+            pathType: Prefix
+            backend:
+              service:
+                name: sendie-server
+                port:
+                  number: 80
+          # OAuth callback must go to server
+          - path: /signin-discord
+            pathType: Prefix
+            backend:
+              service:
+                name: sendie-server
+                port:
+                  number: 80
+          # Health check for server
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: sendie-server
+                port:
+                  number: 80
+          # Everything else goes to client
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sendie-client
+                port:
+                  number: 80

@@ -1,0 +1,99 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-server",
+      "type": "shell",
+      "command": "dotnet",
+      "args": ["build", "--no-restore"],
+      "options": {
+        "cwd": "${workspaceFolder}/server/Sendie.Server"
+      },
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "restore-server",
+      "type": "shell",
+      "command": "dotnet",
+      "args": ["restore"],
+      "options": {
+        "cwd": "${workspaceFolder}/server/Sendie.Server"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "run-server",
+      "type": "shell",
+      "command": "dotnet",
+      "args": ["run"],
+      "options": {
+        "cwd": "${workspaceFolder}/server/Sendie.Server"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^Building\\.\\.\\.$",
+          "endsPattern": "^Now listening on:"
+        }
+      }
+    },
+    {
+      "label": "install-client",
+      "type": "shell",
+      "command": "npm",
+      "args": ["install"],
+      "options": {
+        "cwd": "${workspaceFolder}/client"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "run-client",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": {
+        "cwd": "${workspaceFolder}/client"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*VITE",
+          "endsPattern": "^\\s*➜\\s+Local:"
+        }
+      }
+    },
+    {
+      "label": "build-client",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "build"],
+      "options": {
+        "cwd": "${workspaceFolder}/client"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "run-all",
+      "dependsOn": ["run-server", "run-client"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "setup",
+      "dependsOn": ["restore-server", "install-client"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

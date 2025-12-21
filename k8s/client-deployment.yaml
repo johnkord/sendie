@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sendie-client
+  namespace: sendie
+  labels:
+    app: sendie-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sendie-client
+  template:
+    metadata:
+      labels:
+        app: sendie-client
+    spec:
+      containers:
+        - name: sendie-client
+          image: ${ACR_LOGIN_SERVER}/sendie-client:${IMAGE_TAG}
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sendie-client
+  namespace: sendie
+spec:
+  selector:
+    app: sendie-client
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
