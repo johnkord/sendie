@@ -24,7 +24,7 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
 
             // Replace AllowListService with a test version that allows our test user
             services.AddSingleton<IAllowListService, TestAllowListService>();
-            
+
             // Replace RateLimiterService with a test version that never limits
             services.AddSingleton<IRateLimiterService, TestRateLimiterService>();
         });
@@ -36,19 +36,19 @@ public class TestWebApplicationFactory : WebApplicationFactory<Program>
 /// </summary>
 public class TestAllowListService : IAllowListService
 {
-    public bool IsAllowed(string discordUserId) => 
+    public bool IsAllowed(string discordUserId) =>
         discordUserId == TestAuthHandler.TestUserId;
 
-    public bool IsAdmin(string discordUserId) => 
+    public bool IsAdmin(string discordUserId) =>
         discordUserId == TestAuthHandler.TestUserId;
 
     public bool AddUser(string discordUserId, string addedByAdminId) => true;
-    
+
     public bool RemoveUser(string discordUserId, string removedByAdminId) => true;
-    
-    public IReadOnlyList<AllowedUser> GetAllowedUsers() => 
+
+    public IReadOnlyList<AllowedUser> GetAllowedUsers() =>
         new[] { new AllowedUser(TestAuthHandler.TestUserId, DateTime.UtcNow, TestAuthHandler.TestUserId) };
-    
+
     public IReadOnlyList<string> GetAdmins() => new[] { TestAuthHandler.TestUserId };
 }
 
@@ -57,8 +57,8 @@ public class TestAllowListService : IAllowListService
 /// </summary>
 public class TestRateLimiterService : IRateLimiterService
 {
-    public RateLimitResult IsAllowed(string key, RateLimitPolicy policy) => 
+    public RateLimitResult IsAllowed(string key, RateLimitPolicy policy) =>
         RateLimitResult.Allowed(100);
-    
+
     public void ClearKey(string key) { }
 }
