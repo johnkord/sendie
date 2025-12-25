@@ -11,7 +11,7 @@ public record Session(
     int MaxPeers = 10,
     bool IsLocked = false,
     bool IsHostOnlySending = false,
-    string? CreatorConnectionId = null
+    string? CreatorUserId = null  // Discord user ID of the session creator (host)
 );
 
 public record Peer(

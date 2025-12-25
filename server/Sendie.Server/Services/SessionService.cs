@@ -8,6 +8,7 @@ public class SessionService : ISessionService
 {
     private readonly ConcurrentDictionary<string, Session> _sessions = new();
     private readonly ConcurrentDictionary<string, List<Peer>> _sessionPeers = new();
+    private readonly ConcurrentDictionary<string, string> _connectionToUserId = new();  // ConnectionId -> UserId mapping
     private readonly Timer _cleanupTimer;
 
     // Session TTL configuration
@@ -24,7 +25,7 @@ public class SessionService : ISessionService
     public const int DefaultMaxPeers = 10;
     public const int AbsoluteMaxPeers = 10;
 
-    public Session CreateSession(int maxPeers = DefaultMaxPeers)
+    public Session CreateSession(string creatorUserId, int maxPeers = DefaultMaxPeers)
     {
         // Clamp maxPeers to valid range
         maxPeers = Math.Clamp(maxPeers, 2, AbsoluteMaxPeers);
@@ -38,7 +39,7 @@ public class SessionService : ISessionService
             AbsoluteExpiresAt: now.Add(_absoluteMaxTtl),
             MaxPeers: maxPeers,
             IsLocked: false,
-            CreatorConnectionId: null  // Set when first peer joins
+            CreatorUserId: creatorUserId  // Set at creation time from authenticated user
         );
 
         _sessions[id] = session;
@@ -102,6 +103,19 @@ public class SessionService : ISessionService
 
     public Peer? AddPeerToSession(string sessionId, string connectionId)
     {
+        return AddPeerToSessionInternal(sessionId, connectionId, null);
+    }
+
+    /// <summary>
+    /// Adds a peer to a session with an optional user ID for tracking authenticated users.
+    /// </summary>
+    public Peer? AddPeerToSession(string sessionId, string connectionId, string? userId)
+    {
+        return AddPeerToSessionInternal(sessionId, connectionId, userId);
+    }
+
+    private Peer? AddPeerToSessionInternal(string sessionId, string connectionId, string? userId)
+    {
         if (!_sessions.TryGetValue(sessionId, out var session))
             return null;
 
@@ -144,10 +158,10 @@ public class SessionService : ISessionService
             peers.Add(peer);
         }
 
-        // Set creator if this is the first peer (initiator)
-        if (isInitiator)
+        // Track user ID for this connection (for host identification)
+        if (!string.IsNullOrEmpty(userId))
         {
-            _sessions[sessionId] = session with { CreatorConnectionId = connectionId };
+            _connectionToUserId[connectionId] = userId;
         }
 
         // Extend session and clear empty flag when peer joins
@@ -159,6 +173,9 @@ public class SessionService : ISessionService
 
     public void RemovePeerFromSession(string sessionId, string connectionId)
     {
+        // Clean up user ID mapping
+        _connectionToUserId.TryRemove(connectionId, out _);
+
         if (_sessionPeers.TryGetValue(sessionId, out var peers))
         {
             lock (peers)
@@ -340,35 +357,44 @@ public class SessionService : ISessionService
     // Session Control (Host Powers)
     // ============================================
 
-    public bool IsSessionCreator(string sessionId, string connectionId)
+    public bool IsSessionCreator(string sessionId, string? userId)
     {
+        if (string.IsNullOrEmpty(userId))
+            return false;
+
         if (_sessions.TryGetValue(sessionId, out var session))
         {
-            return session.CreatorConnectionId == connectionId;
+            return session.CreatorUserId == userId;
         }
         return false;
     }
 
-    public bool LockSession(string sessionId, string connectionId)
+    public bool LockSession(string sessionId, string? userId)
     {
+        if (string.IsNullOrEmpty(userId))
+            return false;
+
         if (!_sessions.TryGetValue(sessionId, out var session))
             return false;
 
         // Only the creator can lock the session
-        if (session.CreatorConnectionId != connectionId)
+        if (session.CreatorUserId != userId)
             return false;
 
         _sessions[sessionId] = session with { IsLocked = true };
         return true;
     }
 
-    public bool UnlockSession(string sessionId, string connectionId)
+    public bool UnlockSession(string sessionId, string? userId)
     {
+        if (string.IsNullOrEmpty(userId))
+            return false;
+
         if (!_sessions.TryGetValue(sessionId, out var session))
             return false;
 
         // Only the creator can unlock the session
-        if (session.CreatorConnectionId != connectionId)
+        if (session.CreatorUserId != userId)
             return false;
 
         _sessions[sessionId] = session with { IsLocked = false };
@@ -384,35 +410,72 @@ public class SessionService : ISessionService
         return false;
     }
 
-    public string? GetSessionCreator(string sessionId)
+    public string? GetSessionCreatorUserId(string sessionId)
     {
         if (_sessions.TryGetValue(sessionId, out var session))
         {
-            return session.CreatorConnectionId;
+            return session.CreatorUserId;
         }
         return null;
     }
 
-    public bool EnableHostOnlySending(string sessionId, string connectionId)
+    /// <summary>
+    /// Gets the current ConnectionId of the session host (if they're connected).
+    /// Returns null if the host is not currently in the session.
+    /// </summary>
+    public string? GetHostConnectionId(string sessionId)
     {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return null;
+
+        var creatorUserId = session.CreatorUserId;
+        if (string.IsNullOrEmpty(creatorUserId))
+            return null;
+
+        // Find the connection ID that belongs to the creator
+        if (_sessionPeers.TryGetValue(sessionId, out var peers))
+        {
+            lock (peers)
+            {
+                foreach (var peer in peers)
+                {
+                    if (_connectionToUserId.TryGetValue(peer.ConnectionId, out var userId) && userId == creatorUserId)
+                    {
+                        return peer.ConnectionId;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public bool EnableHostOnlySending(string sessionId, string? userId)
+    {
+        if (string.IsNullOrEmpty(userId))
+            return false;
+
         if (!_sessions.TryGetValue(sessionId, out var session))
             return false;
 
         // Only the creator can enable host-only sending
-        if (session.CreatorConnectionId != connectionId)
+        if (session.CreatorUserId != userId)
             return false;
 
         _sessions[sessionId] = session with { IsHostOnlySending = true };
         return true;
     }
 
-    public bool DisableHostOnlySending(string sessionId, string connectionId)
+    public bool DisableHostOnlySending(string sessionId, string? userId)
     {
+        if (string.IsNullOrEmpty(userId))
+            return false;
+
         if (!_sessions.TryGetValue(sessionId, out var session))
             return false;
 
         // Only the creator can disable host-only sending
-        if (session.CreatorConnectionId != connectionId)
+        if (session.CreatorUserId != userId)
             return false;
 
         _sessions[sessionId] = session with { IsHostOnlySending = false };

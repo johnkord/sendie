@@ -56,7 +56,7 @@ public class SignalingHubTests
         var peer = new Peer("test-connection-id", sessionId, true);
 
         _sessionServiceMock
-            .Setup(s => s.AddPeerToSession(sessionId, "test-connection-id"))
+            .Setup(s => s.AddPeerToSession(sessionId, "test-connection-id", It.IsAny<string?>()))
             .Returns(peer);
 
         _sessionServiceMock
@@ -83,7 +83,7 @@ public class SignalingHubTests
         var sessionId = "invalid-session";
 
         _sessionServiceMock
-            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>()))
+            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns((Peer?)null);
 
         // Act
@@ -103,7 +103,7 @@ public class SignalingHubTests
         var peer = new Peer("test-connection-id", sessionId, true);
 
         _sessionServiceMock
-            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>()))
+            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(peer);
 
         _sessionServiceMock
@@ -127,7 +127,7 @@ public class SignalingHubTests
         var peer = new Peer("test-connection-id", sessionId, false);
 
         _sessionServiceMock
-            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>()))
+            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(peer);
 
         _sessionServiceMock

@@ -4,10 +4,11 @@ namespace Sendie.Server.Services;
 
 public interface ISessionService
 {
-    Session CreateSession(int maxPeers = 10);
+    Session CreateSession(string creatorUserId, int maxPeers = 10);
     Session? GetSession(string id);
     bool SessionExists(string id);
     Peer? AddPeerToSession(string sessionId, string connectionId);
+    Peer? AddPeerToSession(string sessionId, string connectionId, string? userId);  // Overload with user tracking
     void RemovePeerFromSession(string sessionId, string connectionId);
     List<Peer> GetPeersInSession(string sessionId);
     Peer? GetPeerByConnectionId(string connectionId);
@@ -21,12 +22,13 @@ public interface ISessionService
     void DecrementConnectedPairs(string sessionId);
 
     // Session control (host powers)
-    bool IsSessionCreator(string sessionId, string connectionId);
-    bool LockSession(string sessionId, string connectionId);
-    bool UnlockSession(string sessionId, string connectionId);
+    bool IsSessionCreator(string sessionId, string? userId);
+    bool LockSession(string sessionId, string? userId);
+    bool UnlockSession(string sessionId, string? userId);
     bool IsSessionLocked(string sessionId);
-    string? GetSessionCreator(string sessionId);
-    bool EnableHostOnlySending(string sessionId, string connectionId);
-    bool DisableHostOnlySending(string sessionId, string connectionId);
+    string? GetSessionCreatorUserId(string sessionId);
+    string? GetHostConnectionId(string sessionId);  // Get current connection ID of host (if connected)
+    bool EnableHostOnlySending(string sessionId, string? userId);
+    bool DisableHostOnlySending(string sessionId, string? userId);
     bool IsHostOnlySending(string sessionId);
 }

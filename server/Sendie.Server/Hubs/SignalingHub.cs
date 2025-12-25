@@ -105,7 +105,11 @@ public class SignalingHub : Hub
             return new { success = false, error = "Session is locked" };
         }
 
-        var peer = _sessionService.AddPeerToSession(sessionId, Context.ConnectionId);
+        // Get user ID if authenticated (for host tracking)
+        var userId = GetDiscordId();
+
+        // Use overload that accepts userId for tracking
+        var peer = _sessionService.AddPeerToSession(sessionId, Context.ConnectionId, userId);
 
         if (peer == null)
         {
@@ -118,8 +122,8 @@ public class SignalingHub : Hub
         // Notify other peers in the session
         await Clients.OthersInGroup(sessionId).SendAsync("OnPeerJoined", Context.ConnectionId);
 
-        _logger.LogInformation("Peer joined session {SessionId}: {ConnectionId} (initiator: {IsInitiator})",
-            sessionId, Context.ConnectionId, peer.IsInitiator);
+        _logger.LogInformation("Peer joined session {SessionId}: {ConnectionId} (initiator: {IsInitiator}, userId: {UserId})",
+            sessionId, Context.ConnectionId, peer.IsInitiator, userId ?? "anonymous");
 
         // Return list of existing peers
         var existingPeers = _sessionService.GetPeersInSession(sessionId)
@@ -129,8 +133,8 @@ public class SignalingHub : Hub
 
         // Get session info for the joining peer
         var session = _sessionService.GetSession(sessionId);
-        var isHost = _sessionService.IsSessionCreator(sessionId, Context.ConnectionId);
-        var hostConnectionId = _sessionService.GetSessionCreator(sessionId);
+        var isHost = _sessionService.IsSessionCreator(sessionId, userId);
+        var hostConnectionId = _sessionService.GetHostConnectionId(sessionId);
 
         return new
         {
@@ -374,14 +378,15 @@ public class SignalingHub : Hub
             return new { success = false, error = "Not in a session" };
         }
 
-        var success = _sessionService.LockSession(peer.SessionId, Context.ConnectionId);
+        var userId = GetDiscordId();
+        var success = _sessionService.LockSession(peer.SessionId, userId);
         if (!success)
         {
             _logger.LogWarning("Failed to lock session {SessionId}: not the host", peer.SessionId);
             return new { success = false, error = "Only the host can lock the session" };
         }
 
-        _logger.LogInformation("Session {SessionId} locked by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+        _logger.LogInformation("Session {SessionId} locked by {ConnectionId} (userId: {UserId})", peer.SessionId, Context.ConnectionId, userId);
 
         // Notify all peers in the session
         await Clients.Group(peer.SessionId).SendAsync("OnSessionLocked");
@@ -401,7 +406,8 @@ public class SignalingHub : Hub
             return new { success = false, error = "Not in a session" };
         }
 
-        var success = _sessionService.UnlockSession(peer.SessionId, Context.ConnectionId);
+        var userId = GetDiscordId();
+        var success = _sessionService.UnlockSession(peer.SessionId, userId);
         if (!success)
         {
             _logger.LogWarning("Failed to unlock session {SessionId}: not the host", peer.SessionId);
@@ -429,7 +435,8 @@ public class SignalingHub : Hub
         }
 
         // Verify caller is the host
-        if (!_sessionService.IsSessionCreator(peer.SessionId, Context.ConnectionId))
+        var userId = GetDiscordId();
+        if (!_sessionService.IsSessionCreator(peer.SessionId, userId))
         {
             _logger.LogWarning("Failed to kick peer from session {SessionId}: not the host", peer.SessionId);
             return new { success = false, error = "Only the host can kick peers" };
@@ -451,8 +458,8 @@ public class SignalingHub : Hub
         // Remove the peer from the session
         _sessionService.RemovePeerFromSession(peer.SessionId, targetPeerId);
 
-        _logger.LogInformation("Peer {TargetPeerId} kicked from session {SessionId} by host {HostId}",
-            targetPeerId, peer.SessionId, Context.ConnectionId);
+        _logger.LogInformation("Peer {TargetPeerId} kicked from session {SessionId} by host {HostId} (userId: {UserId})",
+            targetPeerId, peer.SessionId, Context.ConnectionId, userId);
 
         // Notify the kicked peer
         await Clients.Client(targetPeerId).SendAsync("OnKicked");
@@ -478,14 +485,15 @@ public class SignalingHub : Hub
             return new { success = false, error = "Not in a session" };
         }
 
-        var success = _sessionService.EnableHostOnlySending(peer.SessionId, Context.ConnectionId);
+        var userId = GetDiscordId();
+        var success = _sessionService.EnableHostOnlySending(peer.SessionId, userId);
         if (!success)
         {
             _logger.LogWarning("Failed to enable host-only sending for session {SessionId}: not the host", peer.SessionId);
             return new { success = false, error = "Only the host can enable host-only sending" };
         }
 
-        _logger.LogInformation("Host-only sending enabled for session {SessionId} by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+        _logger.LogInformation("Host-only sending enabled for session {SessionId} by {ConnectionId} (userId: {UserId})", peer.SessionId, Context.ConnectionId, userId);
 
         // Notify all peers in the session
         await Clients.Group(peer.SessionId).SendAsync("OnHostOnlySendingEnabled");
@@ -505,14 +513,15 @@ public class SignalingHub : Hub
             return new { success = false, error = "Not in a session" };
         }
 
-        var success = _sessionService.DisableHostOnlySending(peer.SessionId, Context.ConnectionId);
+        var userId = GetDiscordId();
+        var success = _sessionService.DisableHostOnlySending(peer.SessionId, userId);
         if (!success)
         {
             _logger.LogWarning("Failed to disable host-only sending for session {SessionId}: not the host", peer.SessionId);
             return new { success = false, error = "Only the host can disable host-only sending" };
         }
 
-        _logger.LogInformation("Host-only sending disabled for session {SessionId} by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+        _logger.LogInformation("Host-only sending disabled for session {SessionId} by {ConnectionId} (userId: {UserId})", peer.SessionId, Context.ConnectionId, userId);
 
         // Notify all peers in the session
         await Clients.Group(peer.SessionId).SendAsync("OnHostOnlySendingDisabled");

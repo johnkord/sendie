@@ -5,6 +5,7 @@ namespace Sendie.Server.Tests.Services;
 public class SessionServiceTests
 {
     private readonly SessionService _sut;
+    private const string TestUserId = "test-user-123";  // Test Discord user ID
 
     public SessionServiceTests()
     {
@@ -17,7 +18,7 @@ public class SessionServiceTests
     public void CreateSession_ShouldReturnSessionWithValidId()
     {
         // Act
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Assert
         session.Should().NotBeNull();
@@ -33,7 +34,7 @@ public class SessionServiceTests
         var beforeCreate = DateTime.UtcNow;
 
         // Act
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Assert
         var afterCreate = DateTime.UtcNow;
@@ -51,7 +52,7 @@ public class SessionServiceTests
     {
         // Act
         var sessions = Enumerable.Range(0, 100)
-            .Select(_ => _sut.CreateSession())
+            .Select(_ => _sut.CreateSession(TestUserId))
             .ToList();
 
         // Assert
@@ -67,7 +68,7 @@ public class SessionServiceTests
     public void GetSession_WithValidId_ShouldReturnSession()
     {
         // Arrange
-        var created = _sut.CreateSession();
+        var created = _sut.CreateSession(TestUserId);
 
         // Act
         var retrieved = _sut.GetSession(created.Id);
@@ -91,7 +92,7 @@ public class SessionServiceTests
     public void GetSession_ShouldIncludePeerCount()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
 
         // Act
@@ -109,7 +110,7 @@ public class SessionServiceTests
     public void SessionExists_WithValidSession_ShouldReturnTrue()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Act
         var exists = _sut.SessionExists(session.Id);
@@ -136,7 +137,7 @@ public class SessionServiceTests
     public void AddPeerToSession_WithValidSession_ShouldReturnPeer()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Act
         var peer = _sut.AddPeerToSession(session.Id, "connection1");
@@ -151,7 +152,7 @@ public class SessionServiceTests
     public void AddPeerToSession_FirstPeer_ShouldBeInitiator()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Act
         var peer = _sut.AddPeerToSession(session.Id, "connection1");
@@ -164,7 +165,7 @@ public class SessionServiceTests
     public void AddPeerToSession_SecondPeer_ShouldNotBeInitiator()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
 
         // Act
@@ -178,7 +179,7 @@ public class SessionServiceTests
     public void AddPeerToSession_AtMaxPeers_ShouldReturnNull()
     {
         // Arrange - Create session with maxPeers=2 to test the limit
-        var session = _sut.CreateSession(2);
+        var session = _sut.CreateSession(TestUserId, 2);
         _sut.AddPeerToSession(session.Id, "connection1");
         _sut.AddPeerToSession(session.Id, "connection2");
 
@@ -193,7 +194,7 @@ public class SessionServiceTests
     public void AddPeerToSession_WithDefaultMaxPeers_ShouldAllowFivePeers()
     {
         // Arrange - Default maxPeers is 5
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
         _sut.AddPeerToSession(session.Id, "connection2");
         _sut.AddPeerToSession(session.Id, "connection3");
@@ -209,15 +210,15 @@ public class SessionServiceTests
     [Fact]
     public void AddPeerToSession_BeyondDefaultMaxPeers_ShouldReturnNull()
     {
-        // Arrange - Default maxPeers is 5
-        var session = _sut.CreateSession();
-        for (int i = 1; i <= 5; i++)
+        // Arrange - Default maxPeers is 10
+        var session = _sut.CreateSession(TestUserId);
+        for (int i = 1; i <= 10; i++)
         {
             _sut.AddPeerToSession(session.Id, $"connection{i}");
         }
 
         // Act
-        var peer = _sut.AddPeerToSession(session.Id, "connection6");
+        var peer = _sut.AddPeerToSession(session.Id, "connection11");
 
         // Assert
         peer.Should().BeNull();
@@ -241,7 +242,7 @@ public class SessionServiceTests
     public void RemovePeerFromSession_ShouldRemovePeer()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
 
         // Act
@@ -256,7 +257,7 @@ public class SessionServiceTests
     public void RemovePeerFromSession_ShouldAllowNewPeerToJoin()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
         _sut.AddPeerToSession(session.Id, "connection2");
         _sut.RemovePeerFromSession(session.Id, "connection1");
@@ -276,7 +277,7 @@ public class SessionServiceTests
     public void GetPeersInSession_WithNoPeers_ShouldReturnEmptyList()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
 
         // Act
         var peers = _sut.GetPeersInSession(session.Id);
@@ -289,7 +290,7 @@ public class SessionServiceTests
     public void GetPeersInSession_WithPeers_ShouldReturnAllPeers()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
         _sut.AddPeerToSession(session.Id, "connection2");
 
@@ -320,7 +321,7 @@ public class SessionServiceTests
     public void GetPeerByConnectionId_WithValidId_ShouldReturnPeer()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
 
         // Act
@@ -345,7 +346,7 @@ public class SessionServiceTests
     public void GetPeerByConnectionId_AfterRemoval_ShouldReturnNull()
     {
         // Arrange
-        var session = _sut.CreateSession();
+        var session = _sut.CreateSession(TestUserId);
         _sut.AddPeerToSession(session.Id, "connection1");
         _sut.RemovePeerFromSession(session.Id, "connection1");
 

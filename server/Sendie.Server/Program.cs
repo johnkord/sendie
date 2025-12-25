@@ -185,7 +185,14 @@ app.MapPost("/api/sessions", (ISessionService sessionService, IRateLimiterServic
         return Results.StatusCode(429);
     }
 
-    var session = sessionService.CreateSession(maxPeers ?? 5);
+    // Get Discord user ID from authenticated user
+    var discordId = context.User.FindFirst("urn:discord:id")?.Value;
+    if (string.IsNullOrEmpty(discordId))
+    {
+        return Results.Unauthorized();
+    }
+
+    var session = sessionService.CreateSession(discordId, maxPeers ?? 5);
     return Results.Ok(session);
 }).RequireAuthorization("AllowedUser");
 

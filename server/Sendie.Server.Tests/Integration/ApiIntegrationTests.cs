@@ -5,12 +5,12 @@ using System.Text.Json;
 
 namespace Sendie.Server.Tests.Integration;
 
-public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+public class ApiIntegrationTests : IClassFixture<TestWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly TestWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public ApiIntegrationTests(WebApplicationFactory<Program> factory)
+    public ApiIntegrationTests(TestWebApplicationFactory factory)
     {
         _factory = factory;
         _client = _factory.CreateClient();
@@ -101,7 +101,8 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         // Assert
         content.TryGetProperty("id", out var id).Should().BeTrue();
         id.GetString().Should().NotBeNullOrEmpty();
-        id.GetString()!.Length.Should().Be(8);
+        // Session ID is 16 bytes base64 encoded (22 chars without padding)
+        id.GetString()!.Length.Should().Be(22);
     }
 
     [Fact]
