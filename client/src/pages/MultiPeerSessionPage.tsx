@@ -520,6 +520,7 @@ export default function MultiPeerSessionPage() {
             <button
               onClick={handleLeaveSession}
               className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+              title="Leave this session and return to home"
             >
               Leave Session
             </button>
@@ -572,6 +573,7 @@ export default function MultiPeerSessionPage() {
                       ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/50'
                       : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
                   }`}
+                  title={connection.isLocked ? 'Unlock session to allow new people to join' : 'Lock session to prevent new people from joining'}
                 >
                   {connection.isLocked ? (
                     <>
@@ -635,8 +637,8 @@ export default function MultiPeerSessionPage() {
           </div>
         )}
 
-        {/* File Queue (when alone or in broadcast mode) */}
-        {(canQueueFiles || queuedFiles.length > 0) && (
+        {/* File Queue & Broadcast Mode Toggle */}
+        {(canSendFiles || canQueueFiles || queuedFiles.length > 0) && (
           <div className="mt-6">
             <FileQueue
               queuedFiles={queuedFiles}

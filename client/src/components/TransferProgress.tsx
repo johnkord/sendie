@@ -71,6 +71,7 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
               <button
                 onClick={onCancel}
                 className="text-sm text-gray-400 hover:text-red-400 transition-colors"
+                title="Cancel this file transfer"
               >
                 Cancel
               </button>

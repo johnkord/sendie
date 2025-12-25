@@ -32,10 +32,6 @@ export function FileQueue({
     broadcastFiles.forEach((f) => onRemoveFile(f.id));
   }, [broadcastFiles, onRemoveFile]);
 
-  if (queuedFiles.length === 0 && !broadcastMode) {
-    return null;
-  }
-
   return (
     <div className="space-y-4">
       {/* Broadcast Mode Toggle */}
@@ -57,6 +53,7 @@ export function FileQueue({
             className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
               broadcastMode ? 'bg-purple-600' : 'bg-gray-600'
             }`}
+            title={broadcastMode ? 'Disable broadcast mode' : 'Enable broadcast mode - files will auto-send to new joiners'}
           >
             <span
               className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
@@ -83,6 +80,7 @@ export function FileQueue({
             <button
               onClick={handleClearOneTime}
               className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+              title="Remove all queued files"
             >
               Clear all
             </button>
@@ -118,6 +116,7 @@ export function FileQueue({
             <button
               onClick={handleClearBroadcast}
               className="text-xs text-purple-400 hover:text-red-400 transition-colors"
+              title="Remove all broadcast files"
             >
               Clear all
             </button>

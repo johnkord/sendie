@@ -43,6 +43,7 @@ export function SessionLink({ sessionId }: SessionLinkProps) {
               : 'bg-purple-600 hover:bg-purple-700 text-white'
             }
           `}
+          title="Copy session link to clipboard"
         >
           {copied ? '✓ Copied!' : 'Copy'}
         </button>
