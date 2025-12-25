@@ -12,6 +12,8 @@ export type SignalingEvents = {
   onSessionLocked: () => void;
   onSessionUnlocked: () => void;
   onKicked: () => void;
+  onHostOnlySendingEnabled: () => void;
+  onHostOnlySendingDisabled: () => void;
 };
 
 export class SignalingService {
@@ -71,6 +73,14 @@ export class SignalingService {
       this.events.onKicked?.();
     });
 
+    this.connection.on('OnHostOnlySendingEnabled', () => {
+      this.events.onHostOnlySendingEnabled?.();
+    });
+
+    this.connection.on('OnHostOnlySendingDisabled', () => {
+      this.events.onHostOnlySendingDisabled?.();
+    });
+
     await this.connection.start();
   }
 
@@ -96,6 +106,7 @@ export class SignalingService {
     isHost?: boolean;
     hostConnectionId?: string;
     isLocked?: boolean;
+    isHostOnlySending?: boolean;
     error?: string 
   }> {
     if (!this.connection) throw new Error('Not connected');
@@ -226,6 +237,24 @@ export class SignalingService {
   async kickPeer(targetPeerId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.connection) throw new Error('Not connected');
     return await this.connection.invoke('KickPeer', targetPeerId);
+  }
+
+  /**
+   * Enable host-only sending mode.
+   * When enabled, only the host can send files.
+   */
+  async enableHostOnlySending(): Promise<{ success: boolean; error?: string }> {
+    if (!this.connection) throw new Error('Not connected');
+    return await this.connection.invoke('EnableHostOnlySending');
+  }
+
+  /**
+   * Disable host-only sending mode.
+   * When disabled, all peers can send files.
+   */
+  async disableHostOnlySending(): Promise<{ success: boolean; error?: string }> {
+    if (!this.connection) throw new Error('Not connected');
+    return await this.connection.invoke('DisableHostOnlySending');
   }
 
   get isConnected(): boolean {

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ConnectionState, TransferState, PeerConnectionState } from '../types';
+import type { ConnectionState, TransferState, PeerConnectionState, QueuedFile } from '../types';
 
 interface AppState {
   // Connection state
@@ -15,6 +15,18 @@ interface AppState {
   clearPeers: () => void;
   getConnectedPeers: () => PeerConnectionState[];
   getPeersWithOpenChannels: () => string[];
+
+  // File queue state
+  queuedFiles: QueuedFile[];
+  broadcastMode: boolean;
+  autoReceive: boolean;
+  addQueuedFile: (file: File) => void;
+  removeQueuedFile: (id: string) => void;
+  clearQueuedFiles: (broadcastOnly?: boolean) => void;
+  setBroadcastMode: (enabled: boolean) => void;
+  setAutoReceive: (enabled: boolean) => void;
+  getOneTimeQueuedFiles: () => QueuedFile[];
+  getBroadcastFiles: () => QueuedFile[];
 
   // Transfers
   transfers: TransferState[];
@@ -34,6 +46,7 @@ const initialConnectionState: ConnectionState = {
   isHost: false,
   hostConnectionId: null,
   isLocked: false,
+  isHostOnlySending: false,
 };
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -45,7 +58,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
   
   resetConnection: () =>
-    set({ connection: initialConnectionState, peers: new Map() }),
+    set({ connection: initialConnectionState, peers: new Map(), queuedFiles: [], broadcastMode: false }),
 
   // Multi-peer state management
   peers: new Map(),
@@ -95,6 +108,52 @@ export const useAppStore = create<AppState>((set, get) => ({
     return Array.from(peers.values())
       .filter(p => p.dataChannelOpen)
       .map(p => p.peerId);
+  },
+
+  // File queue state management
+  queuedFiles: [],
+  broadcastMode: false,
+  autoReceive: true,
+
+  addQueuedFile: (file: File) =>
+    set((state) => ({
+      queuedFiles: [
+        ...state.queuedFiles,
+        {
+          id: crypto.randomUUID(),
+          file,
+          isBroadcast: state.broadcastMode,
+          addedAt: Date.now(),
+        },
+      ],
+    })),
+
+  removeQueuedFile: (id: string) =>
+    set((state) => ({
+      queuedFiles: state.queuedFiles.filter((f) => f.id !== id),
+    })),
+
+  clearQueuedFiles: (broadcastOnly?: boolean) =>
+    set((state) => ({
+      queuedFiles: broadcastOnly 
+        ? state.queuedFiles.filter((f) => !f.isBroadcast)
+        : [],
+    })),
+
+  setBroadcastMode: (enabled: boolean) =>
+    set({ broadcastMode: enabled }),
+
+  setAutoReceive: (enabled: boolean) =>
+    set({ autoReceive: enabled }),
+
+  getOneTimeQueuedFiles: () => {
+    const { queuedFiles } = get();
+    return queuedFiles.filter((f) => !f.isBroadcast);
+  },
+
+  getBroadcastFiles: () => {
+    const { queuedFiles } = get();
+    return queuedFiles.filter((f) => f.isBroadcast);
   },
 
   transfers: [],

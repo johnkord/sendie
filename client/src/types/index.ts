@@ -106,6 +106,7 @@ export interface ConnectionState {
   isHost: boolean;  // Whether the current user is the session host
   hostConnectionId: string | null;  // Connection ID of the host
   isLocked: boolean;  // Whether the session is locked
+  isHostOnlySending: boolean;  // Whether only the host can send files
 }
 
 // Multi-peer transfer tracking
@@ -113,4 +114,12 @@ export interface MultiPeerTransferState extends TransferState {
   targetPeers: string[];  // Peers receiving this file
   peerProgress: Record<string, number>;  // Progress per peer (bytes transferred)
   peerStatus: Record<string, TransferStatus>;  // Status per peer
+}
+
+// File queue types
+export interface QueuedFile {
+  id: string;
+  file: File;
+  isBroadcast: boolean;  // If true, sends to all new joiners; if false, one-time send
+  addedAt: number;
 }

@@ -13,6 +13,9 @@ Sendie is a browser-based peer-to-peer file transfer application that enables di
 - **Large File Support**: Handle files of any size (limited only by browser/device capability)
 - **NAT Traversal**: Seamlessly connect peers behind firewalls and NATs
 - **Identity Verification**: Optional cryptographic verification to prevent MITM attacks
+- **File Queuing**: Queue files before peers join, auto-send on connect
+- **Broadcast Mode**: Send files to all new joiners automatically
+- **Receiver Control**: Recipients can disable auto-receive for incoming files
 
 ---
 
@@ -131,6 +134,7 @@ For reference, the original 2-peer architecture:
 src/
 ├── components/
 │   ├── FileDropZone.tsx        # Drag-and-drop file selection
+│   ├── FileQueue.tsx           # Queued/broadcast files display
 │   ├── TransferProgress.tsx    # Progress indicator with speed/ETA
 │   ├── PeerConnection.tsx      # Connection status display
 │   ├── VerificationCode.tsx    # SAS code display/comparison
@@ -150,7 +154,7 @@ src/
 │   ├── transfer.ts             # Transfer state types
 │   └── crypto.ts               # Crypto-related types
 ├── stores/
-│   └── transferStore.ts        # Global transfer state
+│   └── transferStore.ts        # Global transfer state (incl. queue, broadcast mode)
 └── utils/
     ├── sasGenerator.ts         # Short Authentication String generation
     └── formatters.ts           # File size, speed formatters
@@ -263,6 +267,7 @@ public record Session(
     int ConnectedPeerPairs = 0,
     int MaxPeers = 10,
     bool IsLocked = false,              // Host can lock to prevent new joins
+    bool IsHostOnlySending = false,     // Host can restrict file sending to self only
     string? CreatorConnectionId = null  // Connection ID of session host
 );
 
@@ -396,12 +401,13 @@ public record IceServerConfig(
 └───────┬────────┘                        └───────┬────────┘
         │                                         │
         │  1. User Selects File                   │
+        │     (or queues files before connect)    │
         │                                         │
         │  2. Send File Metadata                  │
         │────────────────────────────────────────►│
         │                                         │
-        │                                         │  3. Receiver Accepts
-        │◄────────────────────────────────────────│
+        │                                         │  3. Auto-accept (if enabled)
+        │                                         │     or silently ignore
         │                                         │
         │  4. Read File in Chunks (64KB each)     │
         │     using File.stream() API             │
@@ -418,6 +424,49 @@ public record IceServerConfig(
         │                                         │
         │  9. Transfer Complete ACK               │
         │◄────────────────────────────────────────│
+```
+
+### 5. File Queue and Broadcast Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          FILE QUEUE / BROADCAST FLOW                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  QUEUE MODE (when alone in session):                                        │
+│  ┌─────────────────┐                                                        │
+│  │ 1. User drops   │──► Files queued locally                                │
+│  │    files        │    (not sent yet)                                      │
+│  └─────────────────┘                                                        │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌─────────────────┐     ┌─────────────────┐                               │
+│  │ 2. Peer joins & │────►│ 3. Queued files │──► Queue cleared               │
+│  │    connects     │     │    auto-send    │    (one-time send)             │
+│  └─────────────────┘     └─────────────────┘                               │
+│                                                                             │
+│  BROADCAST MODE (toggle enabled):                                           │
+│  ┌─────────────────┐                                                        │
+│  │ 1. User enables │──► Files marked as "broadcast"                         │
+│  │    broadcast    │                                                        │
+│  └─────────────────┘                                                        │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌─────────────────┐     ┌─────────────────┐                               │
+│  │ 2. Peer A joins │────►│ 3. Broadcast    │                               │
+│  └─────────────────┘     │    files sent   │                               │
+│           │              └─────────────────┘                               │
+│           ▼                                                                 │
+│  ┌─────────────────┐     ┌─────────────────┐                               │
+│  │ 4. Peer B joins │────►│ 5. Same files   │──► Continues for all          │
+│  │    (later)      │     │    sent to B    │    new joiners                 │
+│  └─────────────────┘     └─────────────────┘                               │
+│                                                                             │
+│  AUTO-RECEIVE (receiver-side toggle):                                       │
+│  • Enabled (default): Files automatically accepted and downloaded           │
+│  • Disabled: Incoming file transfers are silently ignored                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -548,7 +597,7 @@ public class SignalingHub : Hub
     // Session Management
     public async Task<string> CreateSession();
     public async Task<object> JoinSession(string sessionId);
-    // Returns: { success, isInitiator, existingPeers, isHost, hostConnectionId, isLocked }
+    // Returns: { success, isInitiator, existingPeers, isHost, hostConnectionId, isLocked, isHostOnlySending }
     public async Task LeaveSession();
     
     // WebRTC Signaling
@@ -570,6 +619,8 @@ public class SignalingHub : Hub
     public async Task<object> LockSession();    // Prevent new peers from joining
     public async Task<object> UnlockSession();  // Allow new peers to join
     public async Task<object> KickPeer(string targetPeerId);  // Remove peer from session
+    public async Task<object> EnableHostOnlySending();   // Only host can send files
+    public async Task<object> DisableHostOnlySending();  // Everyone can send files
     
     // Connection State Tracking
     public async Task ReportConnectionEstablished(string targetPeerId);
@@ -586,6 +637,8 @@ public class SignalingHub : Hub
     // - OnSessionLocked()       // Session was locked by host
     // - OnSessionUnlocked()     // Session was unlocked by host
     // - OnKicked()              // You were kicked from the session
+    // - OnHostOnlySendingEnabled()   // Host-only sending was enabled
+    // - OnHostOnlySendingDisabled()  // Host-only sending was disabled
 }
 ```
 
@@ -771,6 +824,9 @@ dataChannel.onbufferedamountlow = () => {
 - [x] Dark mode
 - [x] Host controls (lock/unlock session, kick peers)
 - [x] Host badge indicator
+- [x] File queue (queue before peers join, auto-send on connect)
+- [x] Broadcast mode (send to all new joiners)
+- [x] Auto-receive toggle (receiver can disable)
 
 ### Phase 5: Scale ✅ IN PROGRESS
 - [x] Kubernetes deployment (AKS)

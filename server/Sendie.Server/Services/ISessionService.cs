@@ -26,4 +26,7 @@ public interface ISessionService
     bool UnlockSession(string sessionId, string connectionId);
     bool IsSessionLocked(string sessionId);
     string? GetSessionCreator(string sessionId);
+    bool EnableHostOnlySending(string sessionId, string connectionId);
+    bool DisableHostOnlySending(string sessionId, string connectionId);
+    bool IsHostOnlySending(string sessionId);
 }

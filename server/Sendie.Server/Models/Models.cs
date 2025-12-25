@@ -10,6 +10,7 @@ public record Session(
     int ConnectedPeerPairs = 0,
     int MaxPeers = 10,
     bool IsLocked = false,
+    bool IsHostOnlySending = false,
     string? CreatorConnectionId = null
 );
 

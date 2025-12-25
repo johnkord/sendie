@@ -16,6 +16,7 @@ describe('appStore', () => {
         isHost: false,
         hostConnectionId: null,
         isLocked: false,
+        isHostOnlySending: false,
       },
       peers: new Map(),
       transfers: [],

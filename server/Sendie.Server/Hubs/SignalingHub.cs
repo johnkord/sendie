@@ -139,7 +139,8 @@ public class SignalingHub : Hub
             existingPeers,
             isHost,
             hostConnectionId,
-            isLocked = session?.IsLocked ?? false
+            isLocked = session?.IsLocked ?? false,
+            isHostOnlySending = session?.IsHostOnlySending ?? false
         };
     }
 
@@ -461,6 +462,60 @@ public class SignalingHub : Hub
 
         // Remove kicked peer from the SignalR group
         await Groups.RemoveFromGroupAsync(targetPeerId, peer.SessionId);
+
+        return new { success = true };
+    }
+
+    /// <summary>
+    /// Enable host-only sending mode.
+    /// When enabled, only the host can send files; other peers can only receive.
+    /// </summary>
+    public async Task<object> EnableHostOnlySending()
+    {
+        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (peer == null)
+        {
+            return new { success = false, error = "Not in a session" };
+        }
+
+        var success = _sessionService.EnableHostOnlySending(peer.SessionId, Context.ConnectionId);
+        if (!success)
+        {
+            _logger.LogWarning("Failed to enable host-only sending for session {SessionId}: not the host", peer.SessionId);
+            return new { success = false, error = "Only the host can enable host-only sending" };
+        }
+
+        _logger.LogInformation("Host-only sending enabled for session {SessionId} by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+
+        // Notify all peers in the session
+        await Clients.Group(peer.SessionId).SendAsync("OnHostOnlySendingEnabled");
+
+        return new { success = true };
+    }
+
+    /// <summary>
+    /// Disable host-only sending mode.
+    /// When disabled, all peers can send files.
+    /// </summary>
+    public async Task<object> DisableHostOnlySending()
+    {
+        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (peer == null)
+        {
+            return new { success = false, error = "Not in a session" };
+        }
+
+        var success = _sessionService.DisableHostOnlySending(peer.SessionId, Context.ConnectionId);
+        if (!success)
+        {
+            _logger.LogWarning("Failed to disable host-only sending for session {SessionId}: not the host", peer.SessionId);
+            return new { success = false, error = "Only the host can disable host-only sending" };
+        }
+
+        _logger.LogInformation("Host-only sending disabled for session {SessionId} by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+
+        // Notify all peers in the session
+        await Clients.Group(peer.SessionId).SendAsync("OnHostOnlySendingDisabled");
 
         return new { success = true };
     }

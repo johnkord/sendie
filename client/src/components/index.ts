@@ -1,4 +1,5 @@
 export { FileDropZone } from './FileDropZone';
+export { FileQueue } from './FileQueue';
 export { TransferProgress } from './TransferProgress';
 export { ConnectionStatusDisplay } from './ConnectionStatus';
 export { SessionLink } from './SessionLink';

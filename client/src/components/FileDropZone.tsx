@@ -3,6 +3,7 @@ import { useCallback, useRef, DragEvent, ChangeEvent } from 'react';
 interface FileDropZoneProps {
   onFilesSelected: (files: File[]) => void;
   disabled?: boolean;
+  disabledMessage?: string;
   accept?: string;
   multiple?: boolean;
 }
@@ -10,8 +11,9 @@ interface FileDropZoneProps {
 export function FileDropZone({ 
   onFilesSelected, 
   disabled = false,
+  disabledMessage,
   accept,
-  multiple = true 
+  multiple = true,
 }: FileDropZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dropRef = useRef<HTMLDivElement>(null);
@@ -93,10 +95,14 @@ export function FileDropZone({
         <div className="text-5xl">📁</div>
         <div>
           <p className="text-xl font-medium text-white">
-            {disabled ? 'Waiting for connection...' : 'Drop files here'}
+            {disabled 
+              ? (disabledMessage || 'Waiting for connection...') 
+              : 'Drop files here'}
           </p>
           <p className="text-gray-400 mt-1">
-            {disabled ? 'Connect with a peer to start sharing' : 'or click to browse'}
+            {disabled 
+              ? (disabledMessage ? '' : 'Connect with a peer to start sharing') 
+              : 'or click to browse'}
           </p>
         </div>
         {!disabled && (

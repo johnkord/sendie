@@ -392,4 +392,39 @@ public class SessionService : ISessionService
         }
         return null;
     }
+
+    public bool EnableHostOnlySending(string sessionId, string connectionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return false;
+
+        // Only the creator can enable host-only sending
+        if (session.CreatorConnectionId != connectionId)
+            return false;
+
+        _sessions[sessionId] = session with { IsHostOnlySending = true };
+        return true;
+    }
+
+    public bool DisableHostOnlySending(string sessionId, string connectionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return false;
+
+        // Only the creator can disable host-only sending
+        if (session.CreatorConnectionId != connectionId)
+            return false;
+
+        _sessions[sessionId] = session with { IsHostOnlySending = false };
+        return true;
+    }
+
+    public bool IsHostOnlySending(string sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            return session.IsHostOnlySending;
+        }
+        return false;
+    }
 }

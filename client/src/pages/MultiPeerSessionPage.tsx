@@ -9,6 +9,7 @@ import {
 } from '../services';
 import { 
   FileDropZone, 
+  FileQueue,
   TransferProgress, 
   ConnectionStatusDisplay, 
   SessionLink, 
@@ -32,12 +33,26 @@ export default function MultiPeerSessionPage() {
     clearPeers,
     transfers, 
     addTransfer, 
-    updateTransfer 
+    updateTransfer,
+    queuedFiles,
+    broadcastMode,
+    autoReceive,
+    removeQueuedFile,
+    clearQueuedFiles,
+    setBroadcastMode,
+    setAutoReceive,
   } = useAppStore();
   
   const keyPairRef = useRef<KeyPair | null>(null);
   const localKeyJwkRef = useRef<string | null>(null);
   const initializedRef = useRef(false);
+  // Track which peers have already received broadcast files
+  const peersReceivedBroadcastRef = useRef<Set<string>>(new Set());
+
+  // Set up auto-receive checker on mount
+  useEffect(() => {
+    multiPeerFileTransferService.setAutoReceiveChecker(() => useAppStore.getState().autoReceive);
+  }, []);
 
   // Initialize connection
   useEffect(() => {
@@ -70,6 +85,8 @@ export default function MultiPeerSessionPage() {
         signalingService.on('onSessionLocked', handleSessionLocked);
         signalingService.on('onSessionUnlocked', handleSessionUnlocked);
         signalingService.on('onKicked', handleKicked);
+        signalingService.on('onHostOnlySendingEnabled', handleHostOnlySendingEnabled);
+        signalingService.on('onHostOnlySendingDisabled', handleHostOnlySendingDisabled);
 
         // Setup multi-peer WebRTC event handlers
         multiPeerWebRTCService.on('onPeerConnected', handlePeerConnected);
@@ -119,6 +136,7 @@ export default function MultiPeerSessionPage() {
           isHost: result.isHost ?? false,
           hostConnectionId: result.hostConnectionId ?? null,
           isLocked: result.isLocked ?? false,
+          isHostOnlySending: result.isHostOnlySending ?? false,
         });
 
         // If there are existing peers, initiate connections to each
@@ -166,6 +184,8 @@ export default function MultiPeerSessionPage() {
       signalingService.off('onSessionLocked');
       signalingService.off('onSessionUnlocked');
       signalingService.off('onKicked');
+      signalingService.off('onHostOnlySendingEnabled');
+      signalingService.off('onHostOnlySendingDisabled');
       multiPeerWebRTCService.off('onPeerConnected');
       multiPeerWebRTCService.off('onPeerDisconnected');
       multiPeerWebRTCService.off('onDataChannelOpen');
@@ -266,6 +286,46 @@ export default function MultiPeerSessionPage() {
     if (localKeyJwkRef.current) {
       await signalingService.sendPublicKeyTo(peerId, localKeyJwkRef.current);
     }
+
+    // Send queued files to new peer
+    const { broadcastMode, clearQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } = useAppStore.getState();
+    
+    // Check if this is the first peer to connect (for one-time queue files)
+    const otherOpenChannels = multiPeerWebRTCService.getOpenChannels().filter(id => id !== peerId);
+    const isFirstPeer = otherOpenChannels.length === 0;
+
+    // Send one-time queued files only to the first peer that connects
+    if (isFirstPeer) {
+      const oneTimeFiles = getOneTimeQueuedFiles();
+      if (oneTimeFiles.length > 0) {
+        console.log(`Sending ${oneTimeFiles.length} queued files to first peer: ${peerId}`);
+        for (const qf of oneTimeFiles) {
+          try {
+            await multiPeerFileTransferService.sendFileToPeer(qf.file, peerId);
+          } catch (error) {
+            console.error('Failed to send queued file:', error);
+          }
+        }
+        // Clear one-time files after sending
+        clearQueuedFiles(false);
+      }
+    }
+
+    // Send broadcast files to new peers (if not already sent)
+    if (broadcastMode && !peersReceivedBroadcastRef.current.has(peerId)) {
+      const broadcastFiles = getBroadcastFiles();
+      if (broadcastFiles.length > 0) {
+        console.log(`Sending ${broadcastFiles.length} broadcast files to peer: ${peerId}`);
+        peersReceivedBroadcastRef.current.add(peerId);
+        for (const qf of broadcastFiles) {
+          try {
+            await multiPeerFileTransferService.sendFileToPeer(qf.file, peerId);
+          } catch (error) {
+            console.error('Failed to send broadcast file:', error);
+          }
+        }
+      }
+    }
   }, [updatePeer, updateConnectionStatus]);
 
   const handleDataChannelClose = useCallback((peerId: string) => {
@@ -292,6 +352,16 @@ export default function MultiPeerSessionPage() {
     signalingService.disconnect();
     navigate('/', { state: { kicked: true } });
   }, [navigate, clearPeers]);
+
+  const handleHostOnlySendingEnabled = useCallback(() => {
+    console.log('Host-only sending enabled');
+    setConnection({ isHostOnlySending: true });
+  }, [setConnection]);
+
+  const handleHostOnlySendingDisabled = useCallback(() => {
+    console.log('Host-only sending disabled');
+    setConnection({ isHostOnlySending: false });
+  }, [setConnection]);
 
   // Session Control Actions (Host Only)
   const handleToggleLock = useCallback(async () => {
@@ -323,13 +393,53 @@ export default function MultiPeerSessionPage() {
     }
   }, []);
 
-  // File handling - broadcast to all connected peers
+  const handleToggleHostOnlySending = useCallback(async () => {
+    try {
+      if (connection.isHostOnlySending) {
+        const result = await signalingService.disableHostOnlySending();
+        if (!result.success) {
+          console.error('Failed to disable host-only sending:', result.error);
+        }
+      } else {
+        const result = await signalingService.enableHostOnlySending();
+        if (!result.success) {
+          console.error('Failed to enable host-only sending:', result.error);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to toggle host-only sending:', error);
+    }
+  }, [connection.isHostOnlySending]);
+
+  // File handling - either queue files or send immediately based on state
   const handleFilesSelected = useCallback(async (files: File[]) => {
-    if (!multiPeerWebRTCService.hasOpenDataChannels) {
-      console.error('No open data channels');
+    const hasOpenChannels = multiPeerWebRTCService.hasOpenDataChannels;
+    const { broadcastMode, addQueuedFile } = useAppStore.getState();
+    
+    // If no peers connected, queue the files
+    if (!hasOpenChannels) {
+      console.log(`Queueing ${files.length} files (broadcast mode: ${broadcastMode})`);
+      for (const file of files) {
+        addQueuedFile(file);
+      }
       return;
     }
 
+    // If broadcast mode is on, add to broadcast queue and send to all current peers
+    if (broadcastMode) {
+      console.log(`Adding ${files.length} files to broadcast queue and sending to current peers`);
+      for (const file of files) {
+        addQueuedFile(file);
+        try {
+          await multiPeerFileTransferService.broadcastFile(file);
+        } catch (error) {
+          console.error('Failed to broadcast file:', error);
+        }
+      }
+      return;
+    }
+
+    // Normal mode: just broadcast to current peers
     for (const file of files) {
       try {
         await multiPeerFileTransferService.broadcastFile(file);
@@ -347,8 +457,10 @@ export default function MultiPeerSessionPage() {
     signalingService.leaveSession();
     multiPeerWebRTCService.closeAllConnections();
     clearPeers();
+    clearQueuedFiles();
+    setBroadcastMode(false);
     navigate('/');
-  }, [navigate, clearPeers]);
+  }, [navigate, clearPeers, clearQueuedFiles, setBroadcastMode]);
 
   const handleDisconnectPeer = useCallback((peerId: string) => {
     multiPeerWebRTCService.closePeerConnection(peerId);
@@ -356,9 +468,28 @@ export default function MultiPeerSessionPage() {
     updateConnectionStatus();
   }, [removePeer, updateConnectionStatus]);
 
+  // Toggle broadcast mode
+  const handleToggleBroadcastMode = useCallback(() => {
+    setBroadcastMode(!broadcastMode);
+    // Reset the peers received tracking when turning on broadcast mode
+    if (!broadcastMode) {
+      peersReceivedBroadcastRef.current.clear();
+    }
+  }, [broadcastMode, setBroadcastMode]);
+
+  // Toggle auto-receive
+  const handleToggleAutoReceive = useCallback(() => {
+    setAutoReceive(!autoReceive);
+  }, [autoReceive, setAutoReceive]);
+
   const connectedPeerCount = Array.from(peers.values()).filter(p => p.status === 'connected').length;
   const isConnected = connection.status === 'connected' || connection.status === 'partially-connected';
-  const canSendFiles = isConnected && multiPeerWebRTCService.hasOpenDataChannels;
+  
+  // Can't send if host-only sending is enabled and you're not the host
+  const hostOnlyRestricted = connection.isHostOnlySending && !connection.isHost;
+  const canSendFiles = isConnected && multiPeerWebRTCService.hasOpenDataChannels && !hostOnlyRestricted;
+  // Allow queueing files when alone in session (but not if host-only restricted)
+  const canQueueFiles = !canSendFiles && peers.size === 0 && !hostOnlyRestricted;
 
   return (
     <div className="min-h-screen p-4 md:p-8 relative">
@@ -368,12 +499,31 @@ export default function MultiPeerSessionPage() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-2xl font-bold text-white">📤 Sendie</h1>
-          <button
-            onClick={handleLeaveSession}
-            className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
-          >
-            Leave Session
-          </button>
+          <div className="flex items-center gap-4">
+            {/* Auto-receive toggle */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Auto-receive</span>
+              <button
+                onClick={handleToggleAutoReceive}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  autoReceive ? 'bg-green-600' : 'bg-gray-600'
+                }`}
+                title={autoReceive ? 'Auto-receive enabled' : 'Auto-receive disabled'}
+              >
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                    autoReceive ? 'translate-x-5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+            <button
+              onClick={handleLeaveSession}
+              className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+            >
+              Leave Session
+            </button>
+          </div>
         </div>
 
         {/* Connection Status */}
@@ -393,32 +543,58 @@ export default function MultiPeerSessionPage() {
                 <span className="text-yellow-400">👑</span>
                 <span className="text-sm font-medium text-gray-300">Host Controls</span>
               </div>
-              <button
-                onClick={handleToggleLock}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                  connection.isLocked
-                    ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/50'
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
-                }`}
-              >
-                {connection.isLocked ? (
-                  <>
-                    <span>🔒</span>
-                    <span>Locked</span>
-                  </>
-                ) : (
-                  <>
-                    <span>🔓</span>
-                    <span>Unlocked</span>
-                  </>
-                )}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleToggleHostOnlySending}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    connection.isHostOnlySending
+                      ? 'bg-purple-600/20 text-purple-400 hover:bg-purple-600/30 border border-purple-600/50'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                  title={connection.isHostOnlySending ? 'Only you can send files' : 'Everyone can send files'}
+                >
+                  {connection.isHostOnlySending ? (
+                    <>
+                      <span>📤</span>
+                      <span>Host Only</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>👥</span>
+                      <span>Everyone</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={handleToggleLock}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    connection.isLocked
+                      ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/50'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                >
+                  {connection.isLocked ? (
+                    <>
+                      <span>🔒</span>
+                      <span>Locked</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>🔓</span>
+                      <span>Unlocked</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
-            {connection.isLocked && (
-              <p className="mt-2 text-xs text-gray-500">
-                New people cannot join this session while it's locked.
-              </p>
-            )}
+            <div className="mt-2 text-xs text-gray-500 space-y-1">
+              {connection.isHostOnlySending && (
+                <p>Only you can send files in this session.</p>
+              )}
+              {connection.isLocked && (
+                <p>New people cannot join this session while it's locked.</p>
+              )}
+            </div>
           </div>
         )}
 
@@ -427,6 +603,14 @@ export default function MultiPeerSessionPage() {
           <div className="mt-4 p-3 bg-gray-800/50 rounded-lg border border-gray-700 flex items-center gap-2">
             <span>🔒</span>
             <span className="text-sm text-gray-400">This session is locked by the host</span>
+          </div>
+        )}
+
+        {/* Host-Only Sending Indicator (for non-hosts) */}
+        {!connection.isHost && connection.isHostOnlySending && (
+          <div className="mt-4 p-3 bg-gray-800/50 rounded-lg border border-purple-600/30 flex items-center gap-2">
+            <span>📤</span>
+            <span className="text-sm text-purple-400">Only the host can send files in this session</span>
           </div>
         )}
 
@@ -451,11 +635,25 @@ export default function MultiPeerSessionPage() {
           </div>
         )}
 
+        {/* File Queue (when alone or in broadcast mode) */}
+        {(canQueueFiles || queuedFiles.length > 0) && (
+          <div className="mt-6">
+            <FileQueue
+              queuedFiles={queuedFiles}
+              broadcastMode={broadcastMode}
+              onRemoveFile={removeQueuedFile}
+              onClearQueue={clearQueuedFiles}
+              onToggleBroadcastMode={handleToggleBroadcastMode}
+            />
+          </div>
+        )}
+
         {/* File Drop Zone */}
         <div className="mt-6">
           <FileDropZone
             onFilesSelected={handleFilesSelected}
-            disabled={!canSendFiles}
+            disabled={!canSendFiles && !canQueueFiles}
+            disabledMessage={hostOnlyRestricted ? 'Only the host can send files in this session' : undefined}
           />
         </div>
 
@@ -479,8 +677,11 @@ export default function MultiPeerSessionPage() {
 
         {/* Help Text */}
         <div className="mt-8 text-center text-gray-500 text-sm">
-          {connection.status === 'waiting-for-peer' && (
+          {connection.status === 'waiting-for-peer' && queuedFiles.length === 0 && (
             <p>Share the link above with others to connect and start transferring files.</p>
+          )}
+          {connection.status === 'waiting-for-peer' && queuedFiles.length > 0 && (
+            <p>Files queued! They'll be sent automatically when someone joins.</p>
           )}
           {isConnected && (
             <p>

@@ -11,7 +11,11 @@ Secure, browser-based peer-to-peer file transfer using WebRTC.
 - 🔐 **Allow-Listed Session Creation** - Only approved Discord accounts can create sessions
 - ⚡ **Direct P2P** - Files transfer directly between browsers, never touch a server
 - 🔐 **Identity Verification** - SAS code comparison to verify each peer
-- 👑 **Host Controls** - Session creators can lock sessions and kick peers
+- 👑 **Host Controls** - Session creators can lock sessions, kick peers, and restrict sending
+- 📋 **File Queue** - Queue files before anyone joins, auto-send when they connect
+- 📡 **Broadcast Mode** - Automatically send files to every new person who joins
+- 🔕 **Auto-Receive Toggle** - Recipients can disable automatic file receiving
+- 📤 **Host-Only Sending** - Optionally restrict file sending to host only
 
 > **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files) but not anonymous (peers see each other's IPs). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work as it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for details.
 
@@ -64,9 +68,12 @@ Open http://localhost:5173 in your browser.
 ## How It Works
 
 1. **Create a Session** - Sign in with Discord (must be on the allow-list) and click "Create New Session"
-2. **Share the Link** - Send the session link to anyone you want to share files with
-3. **Connect** - Recipients open the link and join instantly—no login required
-4. **Transfer** - Drag and drop files to broadcast them to all connected peers
+2. **Queue Files (Optional)** - Drop files before anyone joins—they'll auto-send when someone connects
+3. **Share the Link** - Send the session link to anyone you want to share files with
+4. **Connect** - Recipients open the link and join instantly—no login required
+5. **Transfer** - Files send automatically if queued, or drag and drop to send more
+
+> **Tip:** Enable **Broadcast Mode** to automatically send your files to everyone who joins the session.
 
 > **Note:** Creating a session requires an allow-listed Discord account, but joining a session only requires the link. Recipients don't need to log in or have a Discord account.
 

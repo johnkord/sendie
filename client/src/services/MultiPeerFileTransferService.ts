@@ -19,7 +19,11 @@ export type MultiPeerFileTransferEvents = {
   onTransferComplete: (transfer: TransferState) => void;
   onTransferError: (fileId: string, error: Error) => void;
   onIncomingFile: (peerId: string, fileId: string, fileName: string, fileSize: number, fileType: string) => void;
+  onFileDeclined: (peerId: string, fileId: string) => void;
 };
+
+// Callback to check if auto-receive is enabled
+type AutoReceiveChecker = () => boolean;
 
 interface BroadcastTransfer {
   file: File;
@@ -55,10 +59,18 @@ export class MultiPeerFileTransferService {
   private incomingTransfers: Map<string, IncomingTransfer> = new Map();  // key: `${peerId}:${fileId}`
   private currentBroadcast: BroadcastTransfer | null = null;
   private sendPaused = false;
+  private autoReceiveChecker: AutoReceiveChecker = () => true;
 
   constructor() {
     // Listen for incoming data from all peers
     multiPeerWebRTCService.on('onDataChannelMessage', this.handleMessage.bind(this));
+  }
+
+  /**
+   * Set a callback to check if auto-receive is enabled
+   */
+  setAutoReceiveChecker(checker: AutoReceiveChecker): void {
+    this.autoReceiveChecker = checker;
   }
 
   on<K extends keyof MultiPeerFileTransferEvents>(event: K, handler: MultiPeerFileTransferEvents[K]): void {
@@ -67,6 +79,149 @@ export class MultiPeerFileTransferService {
 
   off<K extends keyof MultiPeerFileTransferEvents>(event: K): void {
     delete this.events[event];
+  }
+
+  /**
+   * Send a file to a specific peer (used for broadcast mode when new peers join)
+   */
+  async sendFileToPeer(file: File, peerId: string): Promise<void> {
+    if (!multiPeerWebRTCService.isDataChannelOpen(peerId)) {
+      throw new Error(`Data channel not open for peer: ${peerId}`);
+    }
+
+    const fileId = cryptoService.generateFileId();
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    const state: TransferState = {
+      fileId,
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type || 'application/octet-stream',
+      direction: 'send',
+      status: 'pending',
+      bytesTransferred: 0,
+      startTime: null,
+      speed: 0,
+    };
+
+    return new Promise((resolve, reject) => {
+      const transfer: BroadcastTransfer = {
+        file,
+        fileId,
+        state,
+        targetPeers: [peerId],
+        resolve,
+        reject,
+      };
+
+      this.broadcastTransfers.set(fileId, transfer);
+      this.events.onTransferStart?.(state);
+
+      // Send file metadata to specific peer
+      const metadata: DataChannelMessage = {
+        type: 'file-start',
+        fileId,
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || 'application/octet-stream',
+        totalChunks,
+      };
+
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(metadata));
+      
+      // Start sending chunks to this peer
+      this.currentBroadcast = transfer;
+      this.sendChunksToPeer(transfer, totalChunks, peerId);
+    });
+  }
+
+  /**
+   * Send chunks to a specific peer
+   */
+  private async sendChunksToPeer(transfer: BroadcastTransfer, totalChunks: number, peerId: string): Promise<void> {
+    const { file, fileId, state } = transfer;
+    
+    state.status = 'transferring';
+    state.startTime = Date.now();
+    this.events.onTransferProgress?.(state);
+
+    let chunkIndex = 0;
+    const reader = file.stream().getReader();
+    let buffer = new Uint8Array(0);
+
+    const sendNextChunk = async (): Promise<void> => {
+      if (this.sendPaused) {
+        multiPeerWebRTCService.onBufferedAmountLow(() => {
+          this.sendPaused = false;
+          sendNextChunk();
+        });
+        return;
+      }
+
+      // Read more data if needed
+      while (buffer.length < CHUNK_SIZE) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const newBuffer = new Uint8Array(buffer.length + value.length);
+        newBuffer.set(buffer);
+        newBuffer.set(value, buffer.length);
+        buffer = newBuffer;
+      }
+
+      if (buffer.length === 0 && chunkIndex >= totalChunks) {
+        // All chunks sent
+        const endMessage: DataChannelMessage = {
+          type: 'file-end',
+          fileId,
+        };
+        multiPeerWebRTCService.sendTo(peerId, JSON.stringify(endMessage));
+        
+        state.status = 'completed';
+        this.events.onTransferComplete?.(state);
+        this.broadcastTransfers.delete(fileId);
+        this.currentBroadcast = null;
+        transfer.resolve();
+        return;
+      }
+
+      // Extract chunk
+      const chunkSize = Math.min(CHUNK_SIZE, buffer.length);
+      const chunk = buffer.slice(0, chunkSize);
+      buffer = buffer.slice(chunkSize);
+
+      // Send chunk header to peer
+      const chunkHeader: DataChannelMessage = {
+        type: 'file-chunk',
+        fileId,
+        chunkIndex,
+      };
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(chunkHeader));
+
+      // Send chunk data to peer
+      multiPeerWebRTCService.sendTo(peerId, chunk.buffer);
+
+      // Update progress
+      state.bytesTransferred += chunk.length;
+      const elapsed = (Date.now() - state.startTime!) / 1000;
+      state.speed = elapsed > 0 ? state.bytesTransferred / elapsed : 0;
+      this.events.onTransferProgress?.(state);
+
+      chunkIndex++;
+
+      // Check buffer and continue
+      if (!multiPeerWebRTCService.isBufferLow()) {
+        this.sendPaused = true;
+        multiPeerWebRTCService.onBufferedAmountLow(() => {
+          this.sendPaused = false;
+          sendNextChunk();
+        });
+      } else {
+        setTimeout(sendNextChunk, 0);
+      }
+    };
+
+    await sendNextChunk();
   }
 
   /**
@@ -275,6 +430,13 @@ export class MultiPeerFileTransferService {
    * Initialize an incoming transfer from a specific peer
    */
   private async initializeIncomingTransfer(peerId: string, message: FileStartMessage): Promise<void> {
+    // Check if auto-receive is enabled
+    if (!this.autoReceiveChecker()) {
+      console.log(`Auto-receive disabled, declining file from ${peerId}: ${message.fileName}`);
+      this.events.onFileDeclined?.(peerId, message.fileId);
+      return;
+    }
+
     // Sanitize filename from peer to prevent security issues
     const safeFileName = sanitizeFilename(message.fileName);
 

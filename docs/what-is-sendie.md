@@ -11,9 +11,11 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 **How to use it (session creator):**
 1. Sign in with Discord (your account must be on the allow-list)
 2. Click "Create Session"
-3. Share the link with whoever you want to receive your files
-4. Drop files to send them
+3. Drop files now—they'll queue up and send automatically when someone joins
+4. Share the link with whoever you want to receive your files
 5. Use host controls to lock the session or remove unwanted peers
+
+**Pro tip:** Enable **Broadcast Mode** to automatically send files to everyone who joins!
 
 **How to use it (joining a session):**
 1. Click the session link someone shared with you
@@ -26,6 +28,8 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 - ✅ Works with any file size
 - ✅ Up to 10 people can join a single session
 - ✅ Session hosts can lock sessions and kick peers
+- ✅ Queue files before anyone joins—auto-send on connect
+- ✅ Broadcast mode sends files to everyone who joins
 
 **What you need:** A modern browser (Chrome, Firefox, Edge, Safari). That's it.
 
@@ -75,7 +79,11 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 | Max file size | Unlimited (browser/device constrained) |
 | Concurrent transfers | Multiple files, multiple peers |
 | Session duration | Until all peers disconnect |
-| Host controls | Lock/unlock session, kick peers |
+| Host controls | Lock/unlock session, kick peers, restrict sending |
+| File queue | Queue files before peers join |
+| Broadcast mode | Auto-send to all new joiners |
+| Auto-receive | Can be disabled per-user |
+| Host-only sending | Restrict file sending to host only |
 
 **Performance notes:**
 - Transfer speed depends on the slowest peer's connection
@@ -88,6 +96,10 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 - Smaller groups = faster transfers
 - Both peers need stable connections for best speed
 - Use a VPN with WebRTC leak protection if you want to hide your IP from peers
+- Use **Broadcast Mode** to distribute files to a group without manually sending each time
+- Queue files before sharing the link for instant transfer when people join
+- Disable **Auto-receive** if you don't want to accept incoming files
+- Enable **Host-only sending** when distributing files to prevent others from sending
 
 ---
 
@@ -208,4 +220,7 @@ Client (React/Vite) ←→ SignalR Hub ←→ Client (React/Vite)
 | Can you see my files? | No, technically impossible |
 | Can peers see my IP? | Yes, unless you use a VPN |
 | Does it work on Tor? | No, Tor disables WebRTC |
+| Can I queue files? | Yes, auto-send when someone joins |
+| What is broadcast mode? | Auto-sends files to every new joiner |
+| Can I refuse files? | Yes, disable auto-receive |
 | Is it open source? | Yes |

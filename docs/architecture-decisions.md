@@ -309,6 +309,71 @@ http://localhost:5000/signin-discord
 
 ## Decision Log
 
+### 2025-12-24: File Queue and Broadcast Mode
+
+**Context**: Users wanted to prepare files for transfer before recipients join, eliminating the wait time between connection and transfer start.
+
+**Decision**: Implement a file queue system with two modes:
+1. **One-time queue**: Files queued when alone, auto-sent to first peer that connects, then cleared
+2. **Broadcast mode**: Files marked as broadcast are sent to every new peer that joins
+
+**Rationale**:
+- Reduces friction for senders who know what they want to share
+- Broadcast mode is useful for distributing files to a group (e.g., meeting materials)
+- Queue clears after first send by default to prevent unintended re-sends
+- Broadcast mode is opt-in toggle that persists files until disabled
+
+**Implementation**:
+- `QueuedFile` type in `types/index.ts` with `isBroadcast` flag
+- `appStore.ts` - `queuedFiles[]`, `broadcastMode`, actions for queue management
+- `FileQueue.tsx` - UI for viewing/managing queued and broadcast files
+- `handleDataChannelOpen` in `MultiPeerSessionPage.tsx` triggers auto-send
+- Tracks which peers received broadcast files to prevent duplicates
+
+### 2025-12-24: Auto-Receive Toggle
+
+**Context**: Some users may not want to automatically receive incoming files (e.g., in untrusted sessions).
+
+**Decision**: Add per-user auto-receive toggle (enabled by default).
+
+**Rationale**:
+- Default behavior (auto-receive ON) maintains simplicity for most users
+- Toggle in session header for quick access
+- When disabled, incoming file transfers are silently ignored (no notification, no pending state)
+- Does not persist across sessions (resets to ON)
+
+**Implementation**:
+- `autoReceive` state in `appStore.ts`
+- `setAutoReceiveChecker()` on `MultiPeerFileTransferService` 
+- `initializeIncomingTransfer()` checks auto-receive before accepting files
+
+### 2025-12-24: Host-Only Sending Mode
+
+**Context**: Hosts sometimes want to distribute files to a group without allowing others to send files (e.g., one-way file distribution).
+
+**Decision**: Add host-only sending toggle that restricts file sending to the session host.
+
+**Features**:
+- Toggle in Host Controls panel (next to Lock button)
+- When enabled, only the host can send files
+- Non-hosts see disabled drop zone with "Only the host can send files" message
+- Can be toggled on/off at any time during the session
+- Not enabled by default
+
+**Implementation**:
+- `Session.IsHostOnlySending` - Boolean field on session model
+- `SignalingHub.EnableHostOnlySending()` / `DisableHostOnlySending()` - Only callable by host
+- `OnHostOnlySendingEnabled` / `OnHostOnlySendingDisabled` - Broadcast to all peers
+- Client tracks `isHostOnlySending` in connection state
+- FileDropZone disabled for non-hosts when enabled
+- File queue also disabled for non-hosts
+
+**Rationale**:
+- Server-enforced via hub methods (only host can toggle)
+- Client-enforced via UI (prevents accidental drops)
+- Useful for webinar-style file distribution
+- Pairs well with Broadcast Mode for automated distribution
+
 ### 2025-12-24: Multi-Peer Mesh Topology
 
 **Context**: Users requested ability to share files with more than 2 people in a single session.
@@ -577,21 +642,23 @@ client/src/
 ├── components/
 │   ├── ProtectedRoute.tsx    # Auth gate component
 │   ├── UserHeader.tsx        # User info + logout
+│   ├── FileDropZone.tsx      # File selection (queues if no peers)
+│   ├── FileQueue.tsx         # Queued/broadcast files UI
 │   ├── PeerList.tsx          # Multi-peer list with friendly names, SAS codes, kick button
 │   └── ...
 ├── pages/
 │   ├── HomePage.tsx          # Landing + session create/join + kicked message
-│   ├── MultiPeerSessionPage.tsx  # Multi-peer file transfer UI + host controls
+│   ├── MultiPeerSessionPage.tsx  # Multi-peer file transfer UI + host controls + queue
 │   └── AdminPage.tsx         # User management
 ├── services/
 │   ├── AuthService.ts        # Auth API calls
 │   ├── CryptoService.ts      # Key gen, SAS codes, friendly names
 │   ├── SignalingService.ts   # SignalR client + session control methods
 │   ├── MultiPeerWebRTCService.ts   # Mesh peer connections
-│   ├── MultiPeerFileTransferService.ts  # Broadcast file transfers
+│   ├── MultiPeerFileTransferService.ts  # Broadcast file transfers + auto-receive
 │   └── ...
 └── stores/
-    ├── appStore.ts           # App state (peers, transfers, isHost, isLocked)
+    ├── appStore.ts           # App state (peers, transfers, queue, broadcastMode, autoReceive)
     └── authStore.ts          # Auth state (user, loading)
 ```
 
