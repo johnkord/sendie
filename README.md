@@ -11,6 +11,7 @@ Secure, browser-based peer-to-peer file transfer using WebRTC.
 - 🔐 **Allow-Listed Session Creation** - Only approved Discord accounts can create sessions
 - ⚡ **Direct P2P** - Files transfer directly between browsers, never touch a server
 - 🔐 **Identity Verification** - SAS code comparison to verify each peer
+- 👑 **Host Controls** - Session creators can lock sessions and kick peers
 
 > **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files) but not anonymous (peers see each other's IPs). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work as it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for details.
 

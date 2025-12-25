@@ -36,7 +36,9 @@ public class SessionService : ISessionService
             CreatedAt: now,
             ExpiresAt: now.Add(_baseTtl),
             AbsoluteExpiresAt: now.Add(_absoluteMaxTtl),
-            MaxPeers: maxPeers
+            MaxPeers: maxPeers,
+            IsLocked: false,
+            CreatorConnectionId: null  // Set when first peer joins
         );
 
         _sessions[id] = session;
@@ -130,11 +132,22 @@ public class SessionService : ISessionService
             return null;
 
         var isInitiator = peers.Count == 0;
+
+        // Check if session is locked (only applies to non-initiators)
+        if (!isInitiator && session.IsLocked)
+            return null;
+
         var peer = new Peer(connectionId, sessionId, isInitiator);
 
         lock (peers)
         {
             peers.Add(peer);
+        }
+
+        // Set creator if this is the first peer (initiator)
+        if (isInitiator)
+        {
+            _sessions[sessionId] = session with { CreatorConnectionId = connectionId };
         }
 
         // Extend session and clear empty flag when peer joins
@@ -321,5 +334,62 @@ public class SessionService : ISessionService
             .Replace("+", "-")
             .Replace("/", "_")
             .TrimEnd('=');
+    }
+
+    // ============================================
+    // Session Control (Host Powers)
+    // ============================================
+
+    public bool IsSessionCreator(string sessionId, string connectionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            return session.CreatorConnectionId == connectionId;
+        }
+        return false;
+    }
+
+    public bool LockSession(string sessionId, string connectionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return false;
+
+        // Only the creator can lock the session
+        if (session.CreatorConnectionId != connectionId)
+            return false;
+
+        _sessions[sessionId] = session with { IsLocked = true };
+        return true;
+    }
+
+    public bool UnlockSession(string sessionId, string connectionId)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return false;
+
+        // Only the creator can unlock the session
+        if (session.CreatorConnectionId != connectionId)
+            return false;
+
+        _sessions[sessionId] = session with { IsLocked = false };
+        return true;
+    }
+
+    public bool IsSessionLocked(string sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            return session.IsLocked;
+        }
+        return false;
+    }
+
+    public string? GetSessionCreator(string sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            return session.CreatorConnectionId;
+        }
+        return null;
     }
 }

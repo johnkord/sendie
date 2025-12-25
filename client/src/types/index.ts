@@ -102,6 +102,10 @@ export interface ConnectionState {
   error: string | null;
   maxPeers: number;
   localFriendlyName: string | null;  // User's own friendly name for identification
+  // Session control state
+  isHost: boolean;  // Whether the current user is the session host
+  hostConnectionId: string | null;  // Connection ID of the host
+  isLocked: boolean;  // Whether the session is locked
 }
 
 // Multi-peer transfer tracking

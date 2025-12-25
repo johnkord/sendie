@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useCallback, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import type { Session } from '../types';
 import { UserHeader, Footer } from '../components';
 
@@ -25,11 +25,22 @@ function parseRateLimitError(response?: Response, error?: Error): { retryAfter: 
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [loading, setLoading] = useState(false);
   const [joinSessionId, setJoinSessionId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [rateLimitRetry, setRateLimitRetry] = useState<number | null>(null);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const [kickedMessage, setKickedMessage] = useState<string | null>(null);
+
+  // Check if user was kicked from a session
+  useEffect(() => {
+    if (location.state?.kicked) {
+      setKickedMessage('You have been removed from the session by the host.');
+      // Clear the state so the message doesn't persist on refresh
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state]);
 
   const handleCreateSession = useCallback(async () => {
     setLoading(true);
@@ -108,6 +119,22 @@ export default function HomePage() {
       <UserHeader />
       
       <div className="max-w-md w-full">
+        {/* Kicked Message */}
+        {kickedMessage && (
+          <div className="mb-6 p-4 bg-red-900/30 border border-red-600/50 rounded-lg">
+            <div className="flex items-center gap-2">
+              <span>🚫</span>
+              <p className="text-red-300">{kickedMessage}</p>
+            </div>
+            <button
+              onClick={() => setKickedMessage(null)}
+              className="mt-2 text-sm text-red-400 hover:text-red-300"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Logo and Title */}
         <div className="text-center mb-8">
           <h1 className="text-5xl font-bold text-white mb-2">

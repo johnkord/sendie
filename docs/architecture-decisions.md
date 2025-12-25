@@ -505,6 +505,38 @@ http://localhost:5000/signin-discord
 - Config-defined admins and initial users
 - Future: Could add Redis/database for persistence
 
+### 2025-12-24: Session Host Controls (Lock/Unlock, Kick)
+
+**Context**: Session creators had no control over who could join their sessions after creation. Unwanted participants could join if they had the link.
+
+**Decision**: Add host controls allowing the session creator to lock/unlock sessions and kick peers.
+
+**Features**:
+- **Lock/Unlock**: Prevent new peers from joining while allowing existing transfers to continue
+- **Kick**: Remove a specific peer from the session (they're redirected to home page)
+- **Host Badge**: Visual indicator showing who the session host is
+
+**Implementation**:
+- `Session.IsLocked` - Boolean field on session model
+- `Session.CreatorConnectionId` - Tracks who created the session (first peer to join)
+- `SignalingHub.LockSession()` / `UnlockSession()` - Only callable by host
+- `SignalingHub.KickPeer(targetPeerId)` - Removes peer, sends `OnKicked` event
+- Client shows Host Controls panel with lock toggle
+- Client shows host badge (👑) on local user and peer cards
+
+**Why not Ban?**:
+- Considered but decided against for simplicity
+- Kick + Lock covers 90% of use cases
+- Ban would require tracking by IP or public key hash
+- Sessions are ephemeral (max 4 hours) so persistent bans less useful
+- Can reconsider if real-world abuse patterns emerge
+
+**Rationale**:
+- Gives hosts control without requiring authentication for joiners
+- Lock button provides quick "close the door" after expected participants join
+- Kick handles unwanted participants without affecting others
+- Host is automatically the first person in the session (creator)
+
 ### 2025-12-24: User Secrets for Local Dev
 
 **Context**: Need secure way to store Discord credentials locally.
@@ -545,20 +577,21 @@ client/src/
 ├── components/
 │   ├── ProtectedRoute.tsx    # Auth gate component
 │   ├── UserHeader.tsx        # User info + logout
-│   ├── PeerList.tsx          # Multi-peer list with friendly names + SAS codes
+│   ├── PeerList.tsx          # Multi-peer list with friendly names, SAS codes, kick button
 │   └── ...
 ├── pages/
-│   ├── HomePage.tsx          # Landing + session create/join
-│   ├── MultiPeerSessionPage.tsx  # Multi-peer file transfer UI
+│   ├── HomePage.tsx          # Landing + session create/join + kicked message
+│   ├── MultiPeerSessionPage.tsx  # Multi-peer file transfer UI + host controls
 │   └── AdminPage.tsx         # User management
 ├── services/
 │   ├── AuthService.ts        # Auth API calls
 │   ├── CryptoService.ts      # Key gen, SAS codes, friendly names
+│   ├── SignalingService.ts   # SignalR client + session control methods
 │   ├── MultiPeerWebRTCService.ts   # Mesh peer connections
 │   ├── MultiPeerFileTransferService.ts  # Broadcast file transfers
 │   └── ...
 └── stores/
-    ├── appStore.ts           # App state (peers, transfers, localFriendlyName)
+    ├── appStore.ts           # App state (peers, transfers, isHost, isLocked)
     └── authStore.ts          # Auth state (user, loading)
 ```
 

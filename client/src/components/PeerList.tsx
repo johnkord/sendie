@@ -4,6 +4,9 @@ interface PeerListProps {
   peers: Map<string, PeerConnectionState>;
   localFriendlyName?: string | null;
   onRemovePeer?: (peerId: string) => void;
+  onKickPeer?: (peerId: string) => void;
+  isHost?: boolean;
+  hostConnectionId?: string | null;
 }
 
 const statusConfig: Record<PeerConnectionState['status'], { color: string; icon: string; label: string }> = {
@@ -13,7 +16,7 @@ const statusConfig: Record<PeerConnectionState['status'], { color: string; icon:
   failed: { color: 'text-red-400', icon: '✕', label: 'Failed' },
 };
 
-export function PeerList({ peers, localFriendlyName, onRemovePeer }: PeerListProps) {
+export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, isHost, hostConnectionId }: PeerListProps) {
   const peerArray = Array.from(peers.entries());
   
   if (peerArray.length === 0 && !localFriendlyName) {
@@ -28,6 +31,11 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer }: PeerListPro
           <div className="flex items-center gap-2">
             <span className="text-indigo-400 text-sm">You are:</span>
             <span className="text-white font-medium font-mono text-lg">{localFriendlyName}</span>
+            {isHost && (
+              <span className="px-2 py-0.5 bg-yellow-600/20 text-yellow-400 text-xs rounded-full border border-yellow-600/30">
+                👑 Host
+              </span>
+            )}
           </div>
           <p className="text-xs text-indigo-300/70 mt-1">
             Share this name with others so they know who you are
@@ -49,6 +57,7 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer }: PeerListPro
         {peerArray.map(([peerId, state]) => {
           const config = statusConfig[state.status];
           const displayName = state.friendlyName || `Peer ${peerId.substring(0, 8)}`;
+          const isPeerHost = peerId === hostConnectionId;
           
           return (
             <div 
@@ -58,9 +67,16 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer }: PeerListPro
               <div className="flex items-center gap-3">
                 <span className={`text-lg ${config.color}`}>{config.icon}</span>
                 <div>
-                  <p className="text-sm text-white font-mono">
-                    {displayName}
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm text-white font-mono">
+                      {displayName}
+                    </p>
+                    {isPeerHost && (
+                      <span className="px-1.5 py-0.5 bg-yellow-600/20 text-yellow-400 text-xs rounded border border-yellow-600/30">
+                        👑 Host
+                      </span>
+                    )}
+                  </div>
                   <p className={`text-xs ${config.color}`}>
                     {config.label}
                     {state.dataChannelOpen && ' • Ready to transfer'}
@@ -80,6 +96,17 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer }: PeerListPro
                       </p>
                     </div>
                   </div>
+                )}
+                
+                {/* Kick button (host only, can't kick yourself) */}
+                {isHost && onKickPeer && (
+                  <button
+                    onClick={() => onKickPeer(peerId)}
+                    className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-600/20 rounded transition-colors"
+                    title="Kick from session"
+                  >
+                    🚫
+                  </button>
                 )}
                 
                 {onRemovePeer && (

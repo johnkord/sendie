@@ -31,6 +31,9 @@ const initialConnectionState: ConnectionState = {
   error: null,
   maxPeers: 10,
   localFriendlyName: null,
+  isHost: false,
+  hostConnectionId: null,
+  isLocked: false,
 };
 
 export const useAppStore = create<AppState>((set, get) => ({

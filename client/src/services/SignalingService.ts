@@ -8,6 +8,10 @@ export type SignalingEvents = {
   onIceCandidate: (peerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null) => void;
   onPublicKey: (peerId: string, keyJwk: string) => void;
   onSignature: (peerId: string, signature: string, challenge: string) => void;
+  // Session control events
+  onSessionLocked: () => void;
+  onSessionUnlocked: () => void;
+  onKicked: () => void;
 };
 
 export class SignalingService {
@@ -54,6 +58,19 @@ export class SignalingService {
       this.events.onSignature?.(peerId, signature, challenge);
     });
 
+    // Session control events
+    this.connection.on('OnSessionLocked', () => {
+      this.events.onSessionLocked?.();
+    });
+
+    this.connection.on('OnSessionUnlocked', () => {
+      this.events.onSessionUnlocked?.();
+    });
+
+    this.connection.on('OnKicked', () => {
+      this.events.onKicked?.();
+    });
+
     await this.connection.start();
   }
 
@@ -72,7 +89,15 @@ export class SignalingService {
     delete this.events[event];
   }
 
-  async joinSession(sessionId: string): Promise<{ success: boolean; isInitiator?: boolean; existingPeers?: string[]; error?: string }> {
+  async joinSession(sessionId: string): Promise<{ 
+    success: boolean; 
+    isInitiator?: boolean; 
+    existingPeers?: string[]; 
+    isHost?: boolean;
+    hostConnectionId?: string;
+    isLocked?: boolean;
+    error?: string 
+  }> {
     if (!this.connection) throw new Error('Not connected');
     return await this.connection.invoke('JoinSession', sessionId);
   }
@@ -170,6 +195,37 @@ export class SignalingService {
     } catch (error) {
       console.warn('Failed to report connection closed:', error);
     }
+  }
+
+  // ============================================
+  // Session Control Methods (Host Powers)
+  // ============================================
+
+  /**
+   * Lock the session to prevent new peers from joining.
+   * Only the host can lock the session.
+   */
+  async lockSession(): Promise<{ success: boolean; error?: string }> {
+    if (!this.connection) throw new Error('Not connected');
+    return await this.connection.invoke('LockSession');
+  }
+
+  /**
+   * Unlock the session to allow new peers to join.
+   * Only the host can unlock the session.
+   */
+  async unlockSession(): Promise<{ success: boolean; error?: string }> {
+    if (!this.connection) throw new Error('Not connected');
+    return await this.connection.invoke('UnlockSession');
+  }
+
+  /**
+   * Kick a peer from the session.
+   * Only the host can kick peers.
+   */
+  async kickPeer(targetPeerId: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.connection) throw new Error('Not connected');
+    return await this.connection.invoke('KickPeer', targetPeerId);
   }
 
   get isConnected(): boolean {

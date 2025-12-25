@@ -13,6 +13,7 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 2. Click "Create Session"
 3. Share the link with whoever you want to receive your files
 4. Drop files to send them
+5. Use host controls to lock the session or remove unwanted peers
 
 **How to use it (joining a session):**
 1. Click the session link someone shared with you
@@ -24,6 +25,7 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 - ✅ We never see or store your files
 - ✅ Works with any file size
 - ✅ Up to 10 people can join a single session
+- ✅ Session hosts can lock sessions and kick peers
 
 **What you need:** A modern browser (Chrome, Firefox, Edge, Safari). That's it.
 
@@ -73,6 +75,7 @@ Sendie is a browser-based file transfer tool. This document explains what it is 
 | Max file size | Unlimited (browser/device constrained) |
 | Concurrent transfers | Multiple files, multiple peers |
 | Session duration | Until all peers disconnect |
+| Host controls | Lock/unlock session, kick peers |
 
 **Performance notes:**
 - Transfer speed depends on the slowest peer's connection

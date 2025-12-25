@@ -8,7 +8,9 @@ public record Session(
     DateTime? EmptySince = null,
     int PeerCount = 0,
     int ConnectedPeerPairs = 0,
-    int MaxPeers = 10
+    int MaxPeers = 10,
+    bool IsLocked = false,
+    string? CreatorConnectionId = null
 );
 
 public record Peer(

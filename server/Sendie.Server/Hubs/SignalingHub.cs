@@ -98,6 +98,13 @@ public class SignalingHub : Hub
         // Rate limit by IP for join attempts (prevents session enumeration)
         CheckRateLimit(RateLimitPolicy.SessionJoin, GetClientIp());
 
+        // Check if session is locked before attempting to join
+        if (_sessionService.IsSessionLocked(sessionId))
+        {
+            _logger.LogWarning("Failed to join session {SessionId}: session is locked", sessionId);
+            return new { success = false, error = "Session is locked" };
+        }
+
         var peer = _sessionService.AddPeerToSession(sessionId, Context.ConnectionId);
 
         if (peer == null)
@@ -120,11 +127,19 @@ public class SignalingHub : Hub
             .Select(p => p.ConnectionId)
             .ToList();
 
+        // Get session info for the joining peer
+        var session = _sessionService.GetSession(sessionId);
+        var isHost = _sessionService.IsSessionCreator(sessionId, Context.ConnectionId);
+        var hostConnectionId = _sessionService.GetSessionCreator(sessionId);
+
         return new
         {
             success = true,
             isInitiator = peer.IsInitiator,
-            existingPeers
+            existingPeers,
+            isHost,
+            hostConnectionId,
+            isLocked = session?.IsLocked ?? false
         };
     }
 
@@ -340,5 +355,113 @@ public class SignalingHub : Hub
                 peer.SessionId, Context.ConnectionId, targetPeerId);
         }
         return Task.CompletedTask;
+    }
+
+    // ============================================
+    // Session Control Methods (Host Powers)
+    // ============================================
+
+    /// <summary>
+    /// Lock the session to prevent new peers from joining.
+    /// Only the session creator (host) can lock the session.
+    /// </summary>
+    public async Task<object> LockSession()
+    {
+        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (peer == null)
+        {
+            return new { success = false, error = "Not in a session" };
+        }
+
+        var success = _sessionService.LockSession(peer.SessionId, Context.ConnectionId);
+        if (!success)
+        {
+            _logger.LogWarning("Failed to lock session {SessionId}: not the host", peer.SessionId);
+            return new { success = false, error = "Only the host can lock the session" };
+        }
+
+        _logger.LogInformation("Session {SessionId} locked by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+
+        // Notify all peers in the session
+        await Clients.Group(peer.SessionId).SendAsync("OnSessionLocked");
+
+        return new { success = true };
+    }
+
+    /// <summary>
+    /// Unlock the session to allow new peers to join.
+    /// Only the session creator (host) can unlock the session.
+    /// </summary>
+    public async Task<object> UnlockSession()
+    {
+        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (peer == null)
+        {
+            return new { success = false, error = "Not in a session" };
+        }
+
+        var success = _sessionService.UnlockSession(peer.SessionId, Context.ConnectionId);
+        if (!success)
+        {
+            _logger.LogWarning("Failed to unlock session {SessionId}: not the host", peer.SessionId);
+            return new { success = false, error = "Only the host can unlock the session" };
+        }
+
+        _logger.LogInformation("Session {SessionId} unlocked by {ConnectionId}", peer.SessionId, Context.ConnectionId);
+
+        // Notify all peers in the session
+        await Clients.Group(peer.SessionId).SendAsync("OnSessionUnlocked");
+
+        return new { success = true };
+    }
+
+    /// <summary>
+    /// Kick a peer from the session.
+    /// Only the session creator (host) can kick peers.
+    /// </summary>
+    public async Task<object> KickPeer(string targetPeerId)
+    {
+        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (peer == null)
+        {
+            return new { success = false, error = "Not in a session" };
+        }
+
+        // Verify caller is the host
+        if (!_sessionService.IsSessionCreator(peer.SessionId, Context.ConnectionId))
+        {
+            _logger.LogWarning("Failed to kick peer from session {SessionId}: not the host", peer.SessionId);
+            return new { success = false, error = "Only the host can kick peers" };
+        }
+
+        // Verify target is in the same session
+        var targetPeer = _sessionService.GetPeerByConnectionId(targetPeerId);
+        if (targetPeer == null || targetPeer.SessionId != peer.SessionId)
+        {
+            return new { success = false, error = "Peer not found in session" };
+        }
+
+        // Can't kick yourself
+        if (targetPeerId == Context.ConnectionId)
+        {
+            return new { success = false, error = "Cannot kick yourself" };
+        }
+
+        // Remove the peer from the session
+        _sessionService.RemovePeerFromSession(peer.SessionId, targetPeerId);
+
+        _logger.LogInformation("Peer {TargetPeerId} kicked from session {SessionId} by host {HostId}",
+            targetPeerId, peer.SessionId, Context.ConnectionId);
+
+        // Notify the kicked peer
+        await Clients.Client(targetPeerId).SendAsync("OnKicked");
+
+        // Notify other peers that this peer left
+        await Clients.Group(peer.SessionId).SendAsync("OnPeerLeft", targetPeerId);
+
+        // Remove kicked peer from the SignalR group
+        await Groups.RemoveFromGroupAsync(targetPeerId, peer.SessionId);
+
+        return new { success = true };
     }
 }

@@ -256,7 +256,14 @@ interface PeerConnectionState {
 public record Session(
     string Id,
     DateTime CreatedAt,
-    DateTime ExpiresAt
+    DateTime ExpiresAt,
+    DateTime AbsoluteExpiresAt,
+    DateTime? EmptySince = null,
+    int PeerCount = 0,
+    int ConnectedPeerPairs = 0,
+    int MaxPeers = 10,
+    bool IsLocked = false,              // Host can lock to prevent new joins
+    string? CreatorConnectionId = null  // Connection ID of session host
 );
 
 public record Peer(
@@ -540,7 +547,8 @@ public class SignalingHub : Hub
 {
     // Session Management
     public async Task<string> CreateSession();
-    public async Task JoinSession(string sessionId);
+    public async Task<object> JoinSession(string sessionId);
+    // Returns: { success, isInitiator, existingPeers, isHost, hostConnectionId, isLocked }
     public async Task LeaveSession();
     
     // WebRTC Signaling
@@ -548,18 +556,36 @@ public class SignalingHub : Hub
     public async Task SendAnswer(string sdp);
     public async Task SendIceCandidate(IceCandidateMessage candidate);
     
+    // Targeted Signaling (for mesh topology)
+    public async Task SendOfferTo(string targetPeerId, string sdp);
+    public async Task SendAnswerTo(string targetPeerId, string sdp);
+    public async Task SendIceCandidateTo(string targetPeerId, ...);
+    public async Task SendPublicKeyTo(string targetPeerId, string keyJwk);
+    
     // Identity Verification
     public async Task SendPublicKey(string keyJwk);
     public async Task SendSignature(string signature, string challenge);
     
+    // Session Control (Host Powers)
+    public async Task<object> LockSession();    // Prevent new peers from joining
+    public async Task<object> UnlockSession();  // Allow new peers to join
+    public async Task<object> KickPeer(string targetPeerId);  // Remove peer from session
+    
+    // Connection State Tracking
+    public async Task ReportConnectionEstablished(string targetPeerId);
+    public async Task ReportConnectionClosed(string targetPeerId);
+    
     // Client Events (invoked by server)
     // - OnPeerJoined(peerId)
     // - OnPeerLeft(peerId)
-    // - OnOffer(sdp)
-    // - OnAnswer(sdp)
-    // - OnIceCandidate(candidate)
-    // - OnPublicKey(keyJwk)
-    // - OnSignature(signature, challenge)
+    // - OnOffer(peerId, sdp)
+    // - OnAnswer(peerId, sdp)
+    // - OnIceCandidate(peerId, candidate, sdpMid, sdpMLineIndex)
+    // - OnPublicKey(peerId, keyJwk)
+    // - OnSignature(peerId, signature, challenge)
+    // - OnSessionLocked()       // Session was locked by host
+    // - OnSessionUnlocked()     // Session was unlocked by host
+    // - OnKicked()              // You were kicked from the session
 }
 ```
 
@@ -743,6 +769,8 @@ dataChannel.onbufferedamountlow = () => {
 - [x] Multi-peer support (up to 10 peers)
 - [ ] Transfer history (session-only)
 - [x] Dark mode
+- [x] Host controls (lock/unlock session, kick peers)
+- [x] Host badge indicator
 
 ### Phase 5: Scale ✅ IN PROGRESS
 - [x] Kubernetes deployment (AKS)

@@ -19,4 +19,11 @@ public interface ISessionService
     void ClearSessionEmpty(string sessionId);
     void IncrementConnectedPairs(string sessionId);
     void DecrementConnectedPairs(string sessionId);
+
+    // Session control (host powers)
+    bool IsSessionCreator(string sessionId, string connectionId);
+    bool LockSession(string sessionId, string connectionId);
+    bool UnlockSession(string sessionId, string connectionId);
+    bool IsSessionLocked(string sessionId);
+    string? GetSessionCreator(string sessionId);
 }

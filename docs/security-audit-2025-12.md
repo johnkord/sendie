@@ -285,6 +285,7 @@ The following security measures are already well-implemented:
 10. **Targeted Signaling Verification** - `SendOfferTo`/`SendAnswerTo` verify peers are in same session
 11. **HttpOnly Cookies** - Authentication cookies are not accessible to JavaScript
 12. **SameSite Cookie Policy** - Cookies use `Lax` SameSite policy
+13. **Host Controls** - Session creator can lock sessions (prevent new joins) and kick peers; only the original creator can use these controls
 
 ---
 
