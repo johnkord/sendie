@@ -2,7 +2,9 @@
 
 **Author:** AI Assistant  
 **Date:** December 24, 2025  
-**Status:** Draft / Open for Discussion
+**Status:** ✅ Implemented (with enhancements)
+
+> **Implementation Note (December 2025):** Option E (Hybrid Approach) has been implemented with an additional enhancement: **24-hour session persistence while the host is connected**. When the session creator (host) is connected, sessions can persist for up to 24 hours. When the host disconnects, there's a 30-minute grace period before the session reverts to the standard 4-hour maximum. See the "Current Implementation" section below for details.
 
 ---
 
@@ -186,15 +188,17 @@ public record Session(
 
 **Rules**:
 1. **Base TTL**: 30 minutes, sliding on activity
-2. **Absolute maximum**: 4 hours from creation (extended from 2 hours)
-3. **Empty timeout**: 5 minutes after last peer disconnects
-4. **Active connection protection**: Session CANNOT expire while 2+ peers have established WebRTC connections
-5. **Creator disconnect**: No special handling (session continues)
+2. **Absolute maximum (host connected)**: 24 hours from creation
+3. **Absolute maximum (host disconnected)**: 4 hours from creation, or 30-minute grace period after host leaves
+4. **Empty timeout**: 5 minutes after last peer disconnects
+5. **Active connection protection**: Session CANNOT expire while 2+ peers have established WebRTC connections
+6. **Creator disconnect**: 30-minute grace period before TTL reduction
 
 **Activity that extends TTL**:
 - Peer joins session
 - WebRTC connection established (indicates active transfer intent)
 - P2P connection reported active
+- Host (creator) connects to the session
 
 **Activity that does NOT extend TTL**:
 - ICE candidates (too frequent)
@@ -230,6 +234,64 @@ This balances security and usability:
 - Simple mental model for users
 
 **Secondary consideration**: If the "B shares link with C" scenario is truly unacceptable, implement Option D but make it opt-in (session creator can choose "require authenticated participants").
+
+---
+
+## Current Implementation
+
+> **Status:** Implemented in December 2025
+
+The hybrid approach (Option E) has been implemented with the following enhancements:
+
+### Session TTL Rules
+
+| Scenario | Maximum Session Lifetime |
+|----------|-------------------------|
+| Host connected | **24 hours** from session creation |
+| Host disconnected (was connected) | **30-minute grace period**, then 4-hour max |
+| Host never connected | **4 hours** from session creation |
+| Empty session (no peers) | **5 minutes** until expiration |
+| Active P2P transfers | Session will not expire mid-transfer |
+
+### Session Model
+
+```csharp
+public record Session(
+    string Id,
+    DateTime CreatedAt,
+    DateTime ExpiresAt,
+    DateTime AbsoluteExpiresAt,
+    DateTime? EmptySince = null,
+    int PeerCount = 0,
+    int ConnectedPeerPairs = 0,
+    int MaxPeers = 10,
+    bool IsLocked = false,
+    bool IsHostOnlySending = false,
+    string? CreatorUserId = null,    // Discord user ID of the session creator (host)
+    bool IsHostConnected = false,    // Whether the host is currently connected
+    DateTime? HostLastSeen = null    // When the host was last connected (for grace period)
+);
+```
+
+### Configuration (appsettings.json)
+
+```json
+{
+  "Session": {
+    "BaseTtlMinutes": 30,
+    "AbsoluteMaxHoursHostConnected": 24,
+    "AbsoluteMaxHoursHostDisconnected": 4,
+    "HostGraceMinutes": 30,
+    "EmptyTimeoutMinutes": 5
+  }
+}
+```
+
+### SignalR Resilience
+
+Stateful Reconnect is enabled for improved connection resilience during long-running sessions:
+- Server: `options.AllowStatefulReconnects = true`
+- Client: `.withStatefulReconnect()` with progressive retry pattern
 
 ---
 

@@ -79,6 +79,12 @@ public class SignalingHub : Hub
         var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
         if (peer != null)
         {
+            // Get user ID before removing peer (for host tracking)
+            var userId = GetDiscordId();
+            
+            // Update host connection state before removing peer (for 24-hour session persistence)
+            _sessionService.UpdateHostConnectionState(peer.SessionId, Context.ConnectionId, userId, isConnecting: false);
+            
             _sessionService.RemovePeerFromSession(peer.SessionId, Context.ConnectionId);
 
             // Notify other peers in the session
@@ -119,6 +125,9 @@ public class SignalingHub : Hub
 
         await Groups.AddToGroupAsync(Context.ConnectionId, sessionId);
 
+        // Track host connection state for 24-hour session persistence
+        _sessionService.UpdateHostConnectionState(sessionId, Context.ConnectionId, userId, isConnecting: true);
+
         // Notify other peers in the session
         await Clients.OthersInGroup(sessionId).SendAsync("OnPeerJoined", Context.ConnectionId);
 
@@ -153,6 +162,12 @@ public class SignalingHub : Hub
         var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
         if (peer != null)
         {
+            // Get user ID before removing peer (for host tracking)
+            var userId = GetDiscordId();
+            
+            // Update host connection state before removing peer (for 24-hour session persistence)
+            _sessionService.UpdateHostConnectionState(peer.SessionId, Context.ConnectionId, userId, isConnecting: false);
+            
             _sessionService.RemovePeerFromSession(peer.SessionId, Context.ConnectionId);
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, peer.SessionId);
             await Clients.Group(peer.SessionId).SendAsync("OnPeerLeft", Context.ConnectionId);

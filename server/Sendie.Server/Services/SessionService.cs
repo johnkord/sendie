@@ -10,14 +10,18 @@ public class SessionService : ISessionService
     private readonly ConcurrentDictionary<string, List<Peer>> _sessionPeers = new();
     private readonly ConcurrentDictionary<string, string> _connectionToUserId = new();  // ConnectionId -> UserId mapping
     private readonly Timer _cleanupTimer;
+    private readonly ILogger<SessionService>? _logger;
 
     // Session TTL configuration
     private readonly TimeSpan _baseTtl = TimeSpan.FromMinutes(30);
-    private readonly TimeSpan _absoluteMaxTtl = TimeSpan.FromHours(4);
+    private readonly TimeSpan _absoluteMaxTtlHostConnected = TimeSpan.FromHours(24);    // 24 hours when host is connected
+    private readonly TimeSpan _absoluteMaxTtlHostDisconnected = TimeSpan.FromHours(4);  // 4 hours when host is disconnected
+    private readonly TimeSpan _hostGracePeriod = TimeSpan.FromMinutes(30);              // Grace period after host disconnects
     private readonly TimeSpan _emptyTimeout = TimeSpan.FromMinutes(5);
 
-    public SessionService()
+    public SessionService(ILogger<SessionService>? logger = null)
     {
+        _logger = logger;
         // Cleanup expired sessions every minute (more frequent for empty session cleanup)
         _cleanupTimer = new Timer(CleanupExpiredSessions, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
@@ -32,18 +36,25 @@ public class SessionService : ISessionService
 
         var id = GenerateSessionId();
         var now = DateTime.UtcNow;
+        
+        // Session starts with host-disconnected TTL; will extend to 24h when host joins
         var session = new Session(
             Id: id,
             CreatedAt: now,
             ExpiresAt: now.Add(_baseTtl),
-            AbsoluteExpiresAt: now.Add(_absoluteMaxTtl),
+            AbsoluteExpiresAt: now.Add(_absoluteMaxTtlHostDisconnected),  // Will be extended when host connects
             MaxPeers: maxPeers,
             IsLocked: false,
-            CreatorUserId: creatorUserId  // Set at creation time from authenticated user
+            CreatorUserId: creatorUserId,  // Set at creation time from authenticated user
+            IsHostConnected: false,
+            HostLastSeen: null
         );
 
         _sessions[id] = session;
         _sessionPeers[id] = new List<Peer>();
+
+        _logger?.LogInformation("Session {SessionId} created by user {UserId}, initial absolute max: {MaxTtl}h",
+            id, creatorUserId, _absoluteMaxTtlHostDisconnected.TotalHours);
 
         return session;
     }
@@ -54,20 +65,24 @@ public class SessionService : ISessionService
         {
             var now = DateTime.UtcNow;
 
+            // Calculate the effective absolute max based on host connection state
+            var effectiveAbsoluteMax = GetEffectiveAbsoluteMax(session);
+
             // Never expire while peers are actively connected P2P
             if (session.ConnectedPeerPairs > 0)
             {
                 // Session is "alive" - extend TTL automatically
                 var newExpiry = now.Add(_baseTtl);
-                // But don't exceed absolute max
-                if (newExpiry > session.AbsoluteExpiresAt)
+                // But don't exceed effective absolute max
+                if (newExpiry > effectiveAbsoluteMax)
                 {
-                    newExpiry = session.AbsoluteExpiresAt;
+                    newExpiry = effectiveAbsoluteMax;
                 }
 
                 var extended = session with
                 {
                     ExpiresAt = newExpiry,
+                    AbsoluteExpiresAt = effectiveAbsoluteMax,
                     EmptySince = null
                 };
                 _sessions[id] = extended;
@@ -76,9 +91,11 @@ public class SessionService : ISessionService
                 return extended with { PeerCount = peerCount };
             }
 
-            // Check if session has exceeded absolute max (hard limit)
-            if (now > session.AbsoluteExpiresAt)
+            // Check if session has exceeded effective absolute max (hard limit)
+            if (now > effectiveAbsoluteMax)
             {
+                _logger?.LogInformation("Session {SessionId} expired (absolute max exceeded, host connected: {HostConnected})",
+                    id, session.IsHostConnected);
                 RemoveSession(id);
                 return null;
             }
@@ -90,10 +107,45 @@ public class SessionService : ISessionService
                 return null;
             }
 
+            // Update the stored absolute max if it changed
+            if (session.AbsoluteExpiresAt != effectiveAbsoluteMax)
+            {
+                _sessions[id] = session with { AbsoluteExpiresAt = effectiveAbsoluteMax };
+            }
+
             var count = _sessionPeers.TryGetValue(id, out var p) ? p.Count : 0;
-            return session with { PeerCount = count };
+            return session with { PeerCount = count, AbsoluteExpiresAt = effectiveAbsoluteMax };
         }
         return null;
+    }
+
+    /// <summary>
+    /// Calculates the effective absolute maximum expiration based on host connection state.
+    /// - Host connected: 24 hours from session creation
+    /// - Host disconnected: grace period from HostLastSeen, or 4 hours from creation
+    /// </summary>
+    private DateTime GetEffectiveAbsoluteMax(Session session)
+    {
+        if (session.IsHostConnected)
+        {
+            // Host is connected - use 24-hour max from creation time
+            return session.CreatedAt.Add(_absoluteMaxTtlHostConnected);
+        }
+        else if (session.HostLastSeen.HasValue)
+        {
+            // Host was connected but left - use grace period from when they left
+            var graceExpiry = session.HostLastSeen.Value.Add(_hostGracePeriod);
+            var originalMax = session.CreatedAt.Add(_absoluteMaxTtlHostDisconnected);
+            
+            // Use the later of: grace period expiry or original 4-hour max
+            // This prevents the session from expiring sooner than expected if host leaves early
+            return graceExpiry > originalMax ? graceExpiry : originalMax;
+        }
+        else
+        {
+            // Host never connected - use standard 4-hour max
+            return session.CreatedAt.Add(_absoluteMaxTtlHostDisconnected);
+        }
     }
 
     public bool SessionExists(string id)
@@ -230,16 +282,18 @@ public class SessionService : ISessionService
     {
         if (_sessions.TryGetValue(sessionId, out var session))
         {
+            var effectiveAbsoluteMax = GetEffectiveAbsoluteMax(session);
             var newExpiry = DateTime.UtcNow.Add(_baseTtl);
-            // Don't exceed absolute maximum
-            if (newExpiry > session.AbsoluteExpiresAt)
+            // Don't exceed effective absolute maximum
+            if (newExpiry > effectiveAbsoluteMax)
             {
-                newExpiry = session.AbsoluteExpiresAt;
+                newExpiry = effectiveAbsoluteMax;
             }
 
             _sessions[sessionId] = session with
             {
                 ExpiresAt = newExpiry,
+                AbsoluteExpiresAt = effectiveAbsoluteMax,
                 EmptySince = null // Clear empty timer when extending
             };
         }
@@ -326,15 +380,26 @@ public class SessionService : ISessionService
         var now = DateTime.UtcNow;
         var expiredIds = _sessions
             .Where(kvp =>
+            {
+                var session = kvp.Value;
+                var effectiveAbsoluteMax = GetEffectiveAbsoluteMax(session);
+                
                 // Don't expire sessions with active P2P connections (unless past absolute max)
-                (kvp.Value.ConnectedPeerPairs == 0 && kvp.Value.ExpiresAt < now) ||
-                // Always expire past absolute max
-                kvp.Value.AbsoluteExpiresAt < now)
+                if (session.ConnectedPeerPairs == 0 && session.ExpiresAt < now)
+                    return true;
+                    
+                // Always expire past effective absolute max (considers host connection state)
+                if (effectiveAbsoluteMax < now)
+                    return true;
+                    
+                return false;
+            })
             .Select(kvp => kvp.Key)
             .ToList();
 
         foreach (var id in expiredIds)
         {
+            _logger?.LogInformation("Cleaning up expired session {SessionId}", id);
             RemoveSession(id);
         }
     }
@@ -489,5 +554,82 @@ public class SessionService : ISessionService
             return session.IsHostOnlySending;
         }
         return false;
+    }
+
+    // ============================================
+    // Host Presence Tracking (for 24-hour session persistence)
+    // ============================================
+
+    /// <summary>
+    /// Checks if the host (session creator) is currently connected to the session.
+    /// </summary>
+    public bool IsHostCurrentlyConnected(string sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            return session.IsHostConnected;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Updates the host connection state when a peer joins or leaves.
+    /// This affects the session's TTL - 24 hours when host is connected, shorter when disconnected.
+    /// </summary>
+    public void UpdateHostConnectionState(string sessionId, string connectionId, string? userId, bool isConnecting)
+    {
+        if (string.IsNullOrEmpty(userId))
+            return;
+
+        if (!_sessions.TryGetValue(sessionId, out var session))
+            return;
+
+        // Only the creator's connection affects host presence
+        if (session.CreatorUserId != userId)
+            return;
+
+        var now = DateTime.UtcNow;
+
+        if (isConnecting)
+        {
+            // Host is connecting - extend to 24-hour TTL
+            var newAbsoluteMax = session.CreatedAt.Add(_absoluteMaxTtlHostConnected);
+            var newExpiry = now.Add(_baseTtl);
+            if (newExpiry > newAbsoluteMax)
+            {
+                newExpiry = newAbsoluteMax;
+            }
+
+            _sessions[sessionId] = session with
+            {
+                IsHostConnected = true,
+                HostLastSeen = now,
+                AbsoluteExpiresAt = newAbsoluteMax,
+                ExpiresAt = newExpiry
+            };
+
+            _logger?.LogInformation(
+                "Host connected to session {SessionId}. TTL extended to 24 hours (absolute max: {AbsoluteMax})",
+                sessionId, newAbsoluteMax);
+        }
+        else
+        {
+            // Host is disconnecting - record last seen time and recalculate TTL
+            var newHostLastSeen = now;
+            var graceExpiry = newHostLastSeen.Add(_hostGracePeriod);
+            var originalMax = session.CreatedAt.Add(_absoluteMaxTtlHostDisconnected);
+            var newAbsoluteMax = graceExpiry > originalMax ? graceExpiry : originalMax;
+
+            _sessions[sessionId] = session with
+            {
+                IsHostConnected = false,
+                HostLastSeen = newHostLastSeen,
+                AbsoluteExpiresAt = newAbsoluteMax
+            };
+
+            _logger?.LogInformation(
+                "Host disconnected from session {SessionId}. Grace period until {GraceExpiry}, absolute max: {AbsoluteMax}",
+                sessionId, graceExpiry, newAbsoluteMax);
+        }
     }
 }

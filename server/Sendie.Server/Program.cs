@@ -19,7 +19,12 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 // Add services
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    // Extended keep-alive for long-running sessions (24 hours)
+    options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);  // 4x keep-alive for reliability
+});
 builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IAllowListService, AllowListService>();
 builder.Services.AddSingleton<IRateLimiterService, RateLimiterService>();
@@ -257,8 +262,12 @@ adminGroup.MapDelete("/users/{discordUserId}", (
 // Health check endpoint
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
-// SignalR hub
-app.MapHub<SignalingHub>("/hubs/signaling");
+// SignalR hub with stateful reconnect for better connection resilience
+app.MapHub<SignalingHub>("/hubs/signaling", options =>
+{
+    // Enable stateful reconnect for seamless recovery from temporary disconnections
+    options.AllowStatefulReconnects = true;
+});
 
 app.Run();
 

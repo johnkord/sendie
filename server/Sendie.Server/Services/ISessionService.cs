@@ -31,4 +31,8 @@ public interface ISessionService
     bool EnableHostOnlySending(string sessionId, string? userId);
     bool DisableHostOnlySending(string sessionId, string? userId);
     bool IsHostOnlySending(string sessionId);
+
+    // Host presence tracking (for 24-hour session persistence)
+    bool IsHostCurrentlyConnected(string sessionId);
+    void UpdateHostConnectionState(string sessionId, string connectionId, string? userId, bool isConnecting);
 }

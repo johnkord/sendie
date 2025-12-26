@@ -27,7 +27,10 @@ export class SignalingService {
 
     this.connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/signaling')
-      .withAutomaticReconnect()
+      .withAutomaticReconnect([0, 1000, 5000, 10000, 30000]) // Retry pattern for long-lived sessions
+      .withStatefulReconnect()  // Enable stateful reconnect for seamless recovery
+      .withServerTimeout(60000)  // 60 seconds server timeout (matches server config)
+      .withKeepAliveInterval(15000)  // 15 seconds keep-alive (matches server config)
       .configureLogging(signalR.LogLevel.Information)
       .build();
 

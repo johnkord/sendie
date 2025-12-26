@@ -268,8 +268,16 @@ public record Session(
     int MaxPeers = 10,
     bool IsLocked = false,              // Host can lock to prevent new joins
     bool IsHostOnlySending = false,     // Host can restrict file sending to self only
-    string? CreatorConnectionId = null  // Connection ID of session host
+    string? CreatorUserId = null,       // Discord user ID of the session creator (host)
+    bool IsHostConnected = false,       // Whether the host is currently connected
+    DateTime? HostLastSeen = null       // When the host was last connected (for grace period)
 );
+
+// Session TTL Rules:
+// - Host connected: 24 hours from creation
+// - Host disconnected: 30-minute grace period, then 4-hour max
+// - Empty session: 5 minutes until expiration
+// - Active P2P transfers: Session will not expire mid-transfer
 
 public record Peer(
     string ConnectionId,
