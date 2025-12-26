@@ -133,31 +133,34 @@ For reference, the original 2-peer architecture:
 ```
 src/
 ├── components/
+│   ├── ConnectionStatus.tsx    # Connection status display
 │   ├── FileDropZone.tsx        # Drag-and-drop file selection
 │   ├── FileQueue.tsx           # Queued/broadcast files display
+│   ├── Footer.tsx              # App footer
+│   ├── PeerList.tsx            # Multi-peer list with SAS codes
+│   ├── ProtectedRoute.tsx      # Auth route wrapper
+│   ├── SessionLink.tsx         # Shareable session link generator
 │   ├── TransferProgress.tsx    # Progress indicator with speed/ETA
-│   ├── PeerConnection.tsx      # Connection status display
-│   ├── VerificationCode.tsx    # SAS code display/comparison
-│   └── SessionLink.tsx         # Shareable session link generator
-├── hooks/
-│   ├── useWebRTC.ts            # WebRTC connection management
-│   ├── useFileTransfer.ts      # File chunking and transfer logic
-│   ├── useSignaling.ts         # SignalR client wrapper
-│   └── useCrypto.ts            # Key generation and verification
+│   └── UserHeader.tsx          # User info + logout
+├── pages/
+│   ├── AdminPage.tsx           # Admin panel for user management
+│   ├── HomePage.tsx            # Landing + session create/join
+│   └── MultiPeerSessionPage.tsx # Multi-peer file transfer UI
 ├── services/
-│   ├── WebRTCService.ts        # Core WebRTC operations
+│   ├── AuthService.ts          # Auth API calls
+│   ├── CryptoService.ts        # Key gen, SAS codes, friendly names
+│   ├── FileTransferService.ts  # File chunking and transfer (2-peer)
+│   ├── MultiPeerFileTransferService.ts  # Broadcast file transfers
+│   ├── MultiPeerWebRTCService.ts  # Mesh peer connections
 │   ├── SignalingService.ts     # SignalR signaling client
-│   ├── CryptoService.ts        # Cryptographic operations
-│   └── FileChunker.ts          # File streaming and chunking
-├── types/
-│   ├── signaling.ts            # Signaling message types
-│   ├── transfer.ts             # Transfer state types
-│   └── crypto.ts               # Crypto-related types
+│   └── WebRTCService.ts        # Core WebRTC operations (2-peer)
 ├── stores/
-│   └── transferStore.ts        # Global transfer state (incl. queue, broadcast mode)
+│   ├── appStore.ts             # App state (peers, transfers, queue, broadcast)
+│   └── authStore.ts            # Auth state (user, loading)
+├── types/
+│   └── index.ts                # All TypeScript types
 └── utils/
-    ├── sasGenerator.ts         # Short Authentication String generation
-    └── formatters.ts           # File size, speed formatters
+    └── formatters.ts           # File size, speed, filename sanitization
 ```
 
 ### 2. Backend Architecture
@@ -165,17 +168,21 @@ src/
 ```
 Sendie.Server/
 ├── Program.cs                  # Application entry point
+├── Authorization/
+│   └── AuthorizationHandlers.cs # AllowList + Admin handlers
 ├── Hubs/
 │   └── SignalingHub.cs         # SignalR hub for signaling
 ├── Models/
-│   ├── SignalingMessage.cs     # ICE candidates, SDP offers/answers
-│   ├── Session.cs              # Session metadata
-│   └── Peer.cs                 # Peer connection info
+│   └── Models.cs               # All DTOs (Session, Peer, IceServerConfig, etc.)
 ├── Services/
-│   ├── SessionService.cs       # Session management
-│   └── RateLimitService.cs     # Abuse prevention
-└── Configuration/
-    └── IceServerConfig.cs      # STUN/TURN configuration
+│   ├── AllowListService.cs     # In-memory allow-list management
+│   ├── IAllowListService.cs    # Allow-list interface
+│   ├── IRateLimiterService.cs  # Rate limiter interface
+│   ├── ISessionService.cs      # Session management interface
+│   ├── RateLimiterService.cs   # Abuse prevention
+│   └── SessionService.cs       # Session management
+└── Properties/
+    └── launchSettings.json     # Launch profiles
 ```
 
 ---
@@ -217,10 +224,13 @@ interface FileMetadata {
 
 interface TransferState {
   fileId: string;
-  status: 'pending' | 'transferring' | 'completed' | 'failed';
+  fileName: string;
+  fileSize: number;
+  fileType: string;
+  direction: 'send' | 'receive';
+  status: 'pending' | 'transferring' | 'completed' | 'failed' | 'cancelled' | 'error';
   bytesTransferred: number;
-  totalBytes: number;
-  startTime: Date | null;
+  startTime: number | null;
   speed: number; // bytes per second
 }
 
@@ -332,7 +342,7 @@ public record IceServerConfig(
      │◄──────────────────────│                       │
      │                       │                       │
      │  3. Generate Link     │                       │
-     │  (sendie.io/s/{id})   │                       │
+     │  (your-domain/s/{id}) │                       │
      │                       │                       │
      │                       │   4. Join Session     │
      │                       │◄──────────────────────│
@@ -675,7 +685,7 @@ GET  /api/sessions/{id}       # Get session info (exists, peer count)
       "urls": ["stun:stun1.l.google.com:19302"]
     },
     {
-      "urls": ["turn:turn.sendie.io:3478"],
+      "urls": ["turn:your-turn-server.example.com:3478"],
       "username": "sendie",
       "credential": "${TURN_SECRET}"
     }
@@ -687,21 +697,29 @@ GET  /api/sessions/{id}       # Get session info (exists, peer count)
 
 ```json
 {
+  "Discord": {
+    "ClientId": "",
+    "ClientSecret": ""
+  },
+  "AccessControl": {
+    "Admins": [],
+    "InitialAllowList": []
+  },
   "Session": {
-    "MaxDurationMinutes": 60,
-    "MaxPeersPerSession": 2,
-    "CleanupIntervalSeconds": 300
-  },
-  "RateLimiting": {
-    "SessionsPerIpPerHour": 20,
-    "SignalingMessagesPerMinute": 100
-  },
-  "Transfer": {
-    "ChunkSizeBytes": 65536,
-    "MaxConcurrentChunks": 4
+    "BaseTtlMinutes": 30,
+    "AbsoluteMaxHoursHostConnected": 24,
+    "AbsoluteMaxHoursHostDisconnected": 4,
+    "HostGraceMinutes": 30,
+    "EmptyTimeoutMinutes": 5
   }
 }
 ```
+
+**Note:** Rate limiting is configured in `RateLimiterService.cs` with the following defaults:
+- Session creation: 10 per IP per hour
+- Session join: 30 per IP per minute
+- Signaling messages: 100 per connection per second
+- ICE candidates: 200 per connection per second
 
 ---
 

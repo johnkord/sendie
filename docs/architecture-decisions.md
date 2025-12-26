@@ -243,7 +243,7 @@ kubectl apply -f k8s/
 ### Prerequisites
 
 - .NET 8 SDK
-- Node.js 20+
+- Node.js 18+
 - Docker (for container builds)
 
 ### Setup

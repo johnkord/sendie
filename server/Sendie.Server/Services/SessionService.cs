@@ -36,7 +36,7 @@ public class SessionService : ISessionService
 
         var id = GenerateSessionId();
         var now = DateTime.UtcNow;
-        
+
         // Session starts with host-disconnected TTL; will extend to 24h when host joins
         var session = new Session(
             Id: id,
@@ -136,7 +136,7 @@ public class SessionService : ISessionService
             // Host was connected but left - use grace period from when they left
             var graceExpiry = session.HostLastSeen.Value.Add(_hostGracePeriod);
             var originalMax = session.CreatedAt.Add(_absoluteMaxTtlHostDisconnected);
-            
+
             // Use the later of: grace period expiry or original 4-hour max
             // This prevents the session from expiring sooner than expected if host leaves early
             return graceExpiry > originalMax ? graceExpiry : originalMax;
@@ -383,15 +383,15 @@ public class SessionService : ISessionService
             {
                 var session = kvp.Value;
                 var effectiveAbsoluteMax = GetEffectiveAbsoluteMax(session);
-                
+
                 // Don't expire sessions with active P2P connections (unless past absolute max)
                 if (session.ConnectedPeerPairs == 0 && session.ExpiresAt < now)
                     return true;
-                    
+
                 // Always expire past effective absolute max (considers host connection state)
                 if (effectiveAbsoluteMax < now)
                     return true;
-                    
+
                 return false;
             })
             .Select(kvp => kvp.Key)

@@ -81,10 +81,10 @@ public class SignalingHub : Hub
         {
             // Get user ID before removing peer (for host tracking)
             var userId = GetDiscordId();
-            
+
             // Update host connection state before removing peer (for 24-hour session persistence)
             _sessionService.UpdateHostConnectionState(peer.SessionId, Context.ConnectionId, userId, isConnecting: false);
-            
+
             _sessionService.RemovePeerFromSession(peer.SessionId, Context.ConnectionId);
 
             // Notify other peers in the session
@@ -164,10 +164,10 @@ public class SignalingHub : Hub
         {
             // Get user ID before removing peer (for host tracking)
             var userId = GetDiscordId();
-            
+
             // Update host connection state before removing peer (for 24-hour session persistence)
             _sessionService.UpdateHostConnectionState(peer.SessionId, Context.ConnectionId, userId, isConnecting: false);
-            
+
             _sessionService.RemovePeerFromSession(peer.SessionId, Context.ConnectionId);
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, peer.SessionId);
             await Clients.Group(peer.SessionId).SendAsync("OnPeerLeft", Context.ConnectionId);
