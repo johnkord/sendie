@@ -110,7 +110,7 @@ export function ChatPanel() {
           <div
             ref={scrollRef}
             className={`overflow-y-auto bg-slate-950/50 rounded p-2 space-y-1 text-sm ${
-              messages.length === 0 ? 'h-24' : 'h-64'
+              messages.length === 0 ? 'h-32' : 'h-80'
             }`}
           >
             {messages.length === 0 ? (

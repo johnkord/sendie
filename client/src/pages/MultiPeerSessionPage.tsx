@@ -706,9 +706,11 @@ export default function MultiPeerSessionPage() {
           {/* ---------- SIDEBAR ----------
               order-2 on mobile so the primary action (drop zone in
               <main>) reads first. lg:order-1 puts it back to the left
-              on desktop. col-span-5 / 4 leaves room for long peer
-              names without immediately wrapping. */}
-          <aside className="space-y-4 order-2 lg:order-1 lg:col-span-5 xl:col-span-4">
+              on desktop. The sidebar holds identity-only state
+              (status, host controls, invite, peers) so it stays a
+              compact column. col-span-4 / 4 leaves the main column
+              the wider canvas for actions. */}
+          <aside className="space-y-4 order-2 lg:order-1 lg:col-span-4">
             <ConnectionStatusDisplay
               status={connection.status}
               sessionId={connection.sessionId}
@@ -783,34 +785,15 @@ export default function MultiPeerSessionPage() {
                 hostConnectionId={connection.hostConnectionId}
               />
             )}
-
-            {/* Live-share controls grouped into a single section so they
-                read as one capability ("share live media") instead of
-                three separate gizmos. */}
-            {peers.size > 0 && (
-              <section
-                className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3 space-y-2"
-                aria-label="Live sharing"
-              >
-                <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
-                  Share live
-                </div>
-                <VoiceControls />
-                <CameraControls />
-                <ScreenShareControls />
-              </section>
-            )}
-
-            {peers.size > 0 && <ChatPanel />}
           </aside>
 
           {/* ---------- MAIN ----------
-              col-span-7 / 8 to balance the wider sidebar.
+              col-span-8 so the main column gets the visual weight.
               min-h with flex-col so a near-empty main (just the drop
               zone) centers vertically instead of stranding the drop
               zone at the top with empty space below. The threshold is
               the typical sidebar height. */}
-          <main className="space-y-6 order-1 lg:order-2 lg:col-span-7 xl:col-span-8 lg:flex lg:flex-col lg:min-h-[36rem]">
+          <main className="space-y-6 order-1 lg:order-2 lg:col-span-8 lg:flex lg:flex-col lg:min-h-[36rem]">
             {/* Live remote tiles dominate when active. */}
             {peers.size > 0 && (
               <div className="space-y-4">
@@ -878,6 +861,31 @@ export default function MultiPeerSessionPage() {
                 )}
               </div>
             </div>
+
+            {/* Live-share controls grouped into a single section so they
+                read as one capability ("share live media"). Lives in
+                main column rather than sidebar because they are
+                actions paired with file transfer, not identity. */}
+            {peers.size > 0 && (
+              <section
+                className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-4 space-y-3"
+                aria-label="Live sharing"
+              >
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                  Share live media
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <VoiceControls />
+                  <CameraControls />
+                  <ScreenShareControls />
+                </div>
+              </section>
+            )}
+
+            {/* Chat lives at the bottom of main; expanded panel is
+                tall enough to be useful without scrolling away from
+                the drop zone above. */}
+            {peers.size > 0 && <ChatPanel />}
           </main>
         </div>
 

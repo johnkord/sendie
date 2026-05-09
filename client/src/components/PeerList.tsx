@@ -59,20 +59,20 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, i
           return (
             <div
               key={peerId}
-              className="flex items-center justify-between gap-2 p-2 bg-slate-800/40 rounded-lg border border-slate-700/30"
+              className="flex items-start justify-between gap-2 p-2.5 bg-slate-800/40 rounded-lg border border-slate-700/30"
             >
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                <span className={`text-base shrink-0 ${config.color}`} aria-hidden>{config.icon}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-1.5 min-w-0">
-                    {/*
-                      break-all on the friendly name so a long hyphenated
-                      string ('elderberry-garnet-larch-honeysuckle') wraps
-                      cleanly inside the column instead of overflowing into
-                      the action buttons. min-w-0 on the parent flex item is
-                      required for the wrap to take effect.
-                    */}
-                    <p className="text-sm text-white font-mono break-all leading-tight">
+              {/* Body: name on its own line so a long hyphenated friendly
+                  name ('elderberry-garnet-larch-honeysuckle') wraps at the
+                  hyphens rather than every character. status text and the
+                  SAS verification code each get their own row below. */}
+              <div className="flex items-start gap-2 min-w-0 flex-1">
+                <span className={`mt-0.5 text-base shrink-0 ${config.color}`} aria-hidden>{config.icon}</span>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-baseline gap-1.5 min-w-0">
+                    <p
+                      className="text-sm text-white font-mono leading-tight"
+                      style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                    >
                       {displayName}
                     </p>
                     {isPeerHost && (
@@ -89,27 +89,29 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, i
                       </span>
                     )}
                   </div>
-                  <p className={`mt-0.5 text-xs ${config.color}`}>
+                  <p className={`text-xs ${config.color}`}>
                     {config.label}
                     {state.dataChannelOpen && ' · Ready'}
                   </p>
+                  {/* SAS code on its own row so it doesn't fight with the
+                      name for horizontal space. The code is for one-time
+                      verification at session start; it doesn't need to be
+                      eye-level for the rest of the call. */}
+                  {state.sasCode && state.status === 'connected' && (
+                    <div
+                      className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 bg-purple-500/10 rounded border border-purple-500/20 cursor-help group relative"
+                      title="Security code. Both of you should see the same code. Compare out-of-band before sharing sensitive files."
+                    >
+                      <span className="text-[10px] text-slate-400">🔐</span>
+                      <span className="text-[11px] text-purple-300 font-mono break-all">{state.sasCode}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
-                {state.sasCode && state.status === 'connected' && (
-                  <div className="group relative">
-                    <div className="px-1.5 py-0.5 bg-purple-500/10 rounded border border-purple-500/30 cursor-help">
-                      <p className="text-[11px] text-purple-300 font-mono">{state.sasCode}</p>
-                    </div>
-                    <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-56 p-2 bg-slate-950 rounded-lg shadow-xl border border-slate-700 z-10">
-                      <p className="text-xs text-slate-300">
-                        <strong className="text-purple-300">Security code</strong>: both of you should see this same code. Compare out-of-band (voice, in person) before sharing sensitive files.
-                      </p>
-                    </div>
-                  </div>
-                )}
-
+              {/* Action buttons fixed at the top-right so they never get
+                  squeezed by name wrapping. */}
+              <div className="flex items-center gap-1 shrink-0">
                 {isHost && onKickPeer && (
                   <button
                     onClick={() => onKickPeer(peerId)}
