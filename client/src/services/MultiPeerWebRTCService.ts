@@ -510,45 +510,59 @@ export class MultiPeerWebRTCService {
     return false;
   }
 
-  // ----- PoC: local media track management ------------------------------
+  // ----- Local media track management -----------------------------------
 
   /**
-   * Provide a local MediaStream (e.g. from getUserMedia) whose tracks
-   * should be sent to every connected peer. Adding a track triggers
-   * negotiationneeded on each peer connection.
+   * Add one local track to every existing peer connection (and to any
+   * future ones that get created). The optional stream tag is forwarded
+   * to addTrack so receivers can correlate audio + video into a single
+   * MediaStream on the remote side.
    *
-   * Idempotent: calling with the same tracks does nothing.
+   * Triggers negotiationneeded on each peer connection.
    */
-  addLocalStream(stream: MediaStream): void {
-    this.localStream = stream;
-    for (const track of stream.getTracks()) {
-      if (this.localTracks.includes(track)) continue;
-      this.localTracks.push(track);
-      for (const [peerId, info] of this.peerConnections) {
-        try {
+  addLocalTrack(track: MediaStreamTrack, stream?: MediaStream): void {
+    if (this.localTracks.includes(track)) return;
+    this.localTracks.push(track);
+    if (stream) this.localStream = stream;
+    for (const [peerId, info] of this.peerConnections) {
+      try {
+        if (stream) {
           info.connection.addTrack(track, stream);
-        } catch (err) {
-          console.warn(`Could not add track to ${peerId}:`, err);
+        } else {
+          info.connection.addTrack(track);
         }
+      } catch (err) {
+        console.warn(`Could not add track to ${peerId}:`, err);
       }
     }
   }
 
   /**
-   * Stop sharing a previously-added stream. Removes its tracks from every
-   * peer connection (which triggers renegotiation) and stops the tracks.
+   * Convenience: add every track from a MediaStream. Equivalent to calling
+   * addLocalTrack() for each track.
+   */
+  addLocalStream(stream: MediaStream): void {
+    for (const track of stream.getTracks()) {
+      this.addLocalTrack(track, stream);
+    }
+  }
+
+  /**
+   * Stop sharing a single track. Removes it from every peer connection
+   * (which triggers renegotiation) and stops the underlying device.
    *
    * Order-of-ops matters: we remove from peer connections BEFORE stopping
    * tracks, otherwise getSenders().filter(sender.track === track) misses
    * because stopped tracks may compare unequally on some browsers.
    */
-  removeLocalStream(): void {
-    const tracks = this.localTracks;
-    // 1. Remove from every peer connection first.
+  removeLocalTrack(track: MediaStreamTrack): void {
+    const idx = this.localTracks.indexOf(track);
+    if (idx < 0) return;
+    // 1. Remove the matching senders from every peer connection.
     for (const info of this.peerConnections.values()) {
       const senders = info.connection.getSenders();
       for (const sender of senders) {
-        if (sender.track && tracks.includes(sender.track)) {
+        if (sender.track === track) {
           try {
             info.connection.removeTrack(sender);
           } catch (err) {
@@ -557,20 +571,31 @@ export class MultiPeerWebRTCService {
         }
       }
     }
-    // 2. Now stop the tracks themselves.
-    for (const track of tracks) {
-      try {
-        track.stop();
-      } catch {
-        // ignore
-      }
+    // 2. Stop the device-side track.
+    try {
+      track.stop();
+    } catch {
+      // ignore
     }
-    this.localTracks = [];
-    this.localStream = null;
+    this.localTracks.splice(idx, 1);
+    if (this.localTracks.length === 0) {
+      this.localStream = null;
+    }
   }
 
   /**
-   * Get the currently-shared local stream, if any. Useful for self-meter.
+   * Stop sharing every previously-added local track.
+   */
+  removeLocalStream(): void {
+    // Copy because removeLocalTrack mutates the underlying array.
+    for (const track of [...this.localTracks]) {
+      this.removeLocalTrack(track);
+    }
+  }
+
+  /**
+   * Get the currently-shared local stream, if any. Useful for self-meter
+   * and self-preview.
    */
   getLocalStream(): MediaStream | null {
     return this.localStream;

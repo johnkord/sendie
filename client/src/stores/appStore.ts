@@ -85,6 +85,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         verification: 'pending',
         fingerprint: null,
         voiceState: null,
+        cameraState: null,
         ...initialState,
       });
       return { peers: newPeers };

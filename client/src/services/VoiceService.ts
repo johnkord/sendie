@@ -111,7 +111,9 @@ class VoiceService {
         },
       });
       this.localStream = stream;
-      multiPeerWebRTCService.addLocalStream(stream);
+      for (const track of stream.getAudioTracks()) {
+        multiPeerWebRTCService.addLocalTrack(track, stream);
+      }
 
       // Self-meter: AnalyserNode on the local stream.
       try {
@@ -140,7 +142,11 @@ class VoiceService {
    */
   async stop(): Promise<void> {
     if (!this.active) return;
-    multiPeerWebRTCService.removeLocalStream();
+    if (this.localStream) {
+      for (const track of this.localStream.getAudioTracks()) {
+        multiPeerWebRTCService.removeLocalTrack(track);
+      }
+    }
     this.localStream = null;
     if (this.localAudioCtx) {
       try {

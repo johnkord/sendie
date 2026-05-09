@@ -7,7 +7,8 @@ import {
   cryptoService, 
   multiPeerFileTransferService,
   verificationService,
-  voiceService
+  voiceService,
+  cameraService
 } from '../services';
 import { 
   FileDropZone, 
@@ -18,6 +19,8 @@ import {
   UserHeader,
   PeerList,
   VoiceControls,
+  CameraControls,
+  RemoteVideos,
   Footer 
 } from '../components';
 import type { KeyPair } from '../types';
@@ -278,6 +281,7 @@ export default function MultiPeerSessionPage() {
       verificationService.off('onVerificationComplete');
       verificationService.reset();
       voiceService.reset();
+      cameraService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
       signalingService.disconnect();
@@ -462,6 +466,7 @@ export default function MultiPeerSessionPage() {
     console.log('You have been kicked from the session');
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
+    cameraService.reset();
     clearPeers();
     signalingService.disconnect();
     navigate('/', { state: { kicked: true } });
@@ -571,6 +576,7 @@ export default function MultiPeerSessionPage() {
     signalingService.leaveSession();
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
+    cameraService.reset();
     clearPeers();
     clearQueuedFiles();
     setBroadcastMode(false);
@@ -773,8 +779,16 @@ export default function MultiPeerSessionPage() {
             explicitly clicks Start. Currently audio-only; see
             docs/voice-poc-notes.md and the realtime-av proposal. */}
         {peers.size > 0 && (
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap gap-3">
             <VoiceControls />
+            <CameraControls />
+          </div>
+        )}
+
+        {/* Remote video tiles for peers who are sharing camera. */}
+        {peers.size > 0 && (
+          <div className="mt-4">
+            <RemoteVideos peers={peers} />
           </div>
         )}
 

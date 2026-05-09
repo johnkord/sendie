@@ -7,4 +7,6 @@ export { ProtectedRoute } from './ProtectedRoute';
 export { UserHeader } from './UserHeader';
 export { PeerList } from './PeerList';
 export { VoiceControls } from './VoiceControls';
+export { CameraControls } from './CameraControls';
+export { RemoteVideos } from './RemoteVideos';
 export { default as Footer } from './Footer';

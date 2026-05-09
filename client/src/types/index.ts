@@ -34,6 +34,8 @@ export interface PeerConnectionState {
   // Voice PoC: state of the remote peer's outgoing audio. `null` means we
   // have not received a voice-state message from them, treat as not sharing.
   voiceState: { sharing: boolean; muted: boolean } | null;
+  // Video: state of the remote peer's outgoing video.
+  cameraState: { sharing: boolean } | null;
 }
 
 export interface PeerInfo {
@@ -100,7 +102,8 @@ export type DataChannelMessage =
   // the remote UI so it can show a 🔇 indicator. Pure UX hint; the
   // underlying audio is already silenced regardless of whether the
   // message arrives.
-  | { type: 'voice-state'; muted: boolean; sharing: boolean };
+  | { type: 'voice-state'; muted: boolean; sharing: boolean }
+  | { type: 'camera-state'; sharing: boolean };
 
 // Crypto Types
 export interface KeyPair {
