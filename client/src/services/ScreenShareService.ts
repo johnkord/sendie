@@ -74,6 +74,17 @@ class ScreenShareService {
     };
 
     multiPeerWebRTCService.on('onTrack', (peerId, stream, kind) => {
+      // Audio for an already-claimed screen stream: notify subscribers so
+      // the UI can re-detect audio presence and unhide the mute toggle.
+      // The audio track itself attaches to the same MediaStream natively
+      // (the browser merges by stream id), so the existing <video> just
+      // starts playing it.
+      if (kind === 'audio') {
+        if (this.remoteStreamsByPeer.get(peerId) === stream) {
+          for (const cb of this.streamSubscribers) cb(peerId);
+        }
+        return;
+      }
       if (kind !== 'video') return;
       const peer = useAppStore.getState().peers.get(peerId);
       const announcedScreen = peer?.screenState?.streamId;
@@ -82,10 +93,9 @@ class ScreenShareService {
         for (const cb of this.streamSubscribers) cb(peerId);
         return;
       }
-      // Not yet known whether this is camera or screen. Buffer briefly so
-      // a late-arriving screen-state can still claim it. Camera tracks
-      // also pass through here harmlessly; CameraService claims them on
-      // its own onTrack handler in parallel.
+      // Unknown stream: buffer briefly. Either a screen-state will land
+      // and claim it, or a screen-state will land in ScreenShareService
+      // and the buffer will time out harmlessly.
       if (!pendingByPeer.has(peerId)) pendingByPeer.set(peerId, new Map());
       pendingByPeer.get(peerId)!.set(stream.id, stream);
       sweepPending(peerId, stream.id);
@@ -168,6 +178,22 @@ class ScreenShareService {
       && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
   }
 
+  /**
+   * Whether the browser will actually offer to capture audio along with
+   * the screen. Chrome and Edge on desktop do; Firefox and Safari do not.
+   * On Linux/macOS Chromium, only tab audio is available; on Windows and
+   * ChromeOS, system-audio is also available. We use the systemAudio
+   * constraint as a proxy for "this browser knows about screen-share
+   * audio at all". Caller uses this to show or hide the audio toggle.
+   */
+  isAudioSupported(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    const supported = navigator.mediaDevices?.getSupportedConstraints?.() ?? {};
+    // systemAudio appears in supported constraints on Chromium-family
+    // browsers; absent on Firefox and Safari.
+    return Boolean((supported as Record<string, unknown>).systemAudio);
+  }
+
   getLocalStream(): MediaStream | null {
     return this.localStream;
   }
@@ -200,8 +226,14 @@ class ScreenShareService {
   /**
    * Prompt for screen capture and start sharing with every connected peer.
    * Refuses when at MAX_SCREEN_PEERS.
+   *
+   * @param withAudio  If true and supported, ask the browser to also
+   *                   include audio (tab audio or system audio depending
+   *                   on user choice in the picker). Chrome/Edge desktop
+   *                   only; ignored elsewhere. The user still has the
+   *                   final say via a checkbox in the picker.
    */
-  async start(): Promise<void> {
+  async start(opts: { withAudio?: boolean } = {}): Promise<void> {
     if (this.active) return;
     if (!this.isSupported()) {
       const err = new Error('Screen sharing is not supported on this browser. Use a desktop browser.');
@@ -222,15 +254,24 @@ class ScreenShareService {
       // surfaceSwitching, monitorTypeSurfaces). Browsers that recognize
       // these accept them; browsers that don't (Firefox, Safari) ignore
       // unknown properties harmlessly per the Screen Capture spec.
+      const wantAudio = !!opts.withAudio && this.isAudioSupported();
       const constraints = {
         video: {
           frameRate: { ideal: 30, max: 60 },
         },
-        audio: false,
+        // audio:true asks the browser to *offer* tab/system audio; the
+        // user still picks via the picker checkbox. If false, the
+        // checkbox is suppressed entirely.
+        audio: wantAudio,
         selfBrowserSurface: 'exclude',
         surfaceSwitching: 'include',
         monitorTypeSurfaces: 'include',
-        systemAudio: 'exclude',
+        // include = offer to capture system audio when sharing entire
+        // screen (user still has to opt in via the picker checkbox).
+        // exclude = never offer it, even when the underlying browser
+        // would. We set 'include' when the user asked for audio so the
+        // picker on Windows/ChromeOS can offer system audio.
+        systemAudio: wantAudio ? 'include' : 'exclude',
       } as DisplayMediaStreamOptions;
       const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
       const [videoTrack] = stream.getVideoTracks();
@@ -264,6 +305,28 @@ class ScreenShareService {
       videoTrack.addEventListener('ended', this.trackEndedHandler);
 
       multiPeerWebRTCService.addLocalTrack(videoTrack, stream);
+      // If the user opted into capturing audio in the picker, send that
+      // track too. We attach it to the same MediaStream so the receiver's
+      // <video srcObject={stream}> element plays the audio automatically;
+      // no separate <audio> element required.
+      for (const audioTrack of stream.getAudioTracks()) {
+        // Tab/system audio is high-fidelity content; turn off the
+        // voice-tuned processing the WebRTC stack would otherwise apply.
+        try {
+          await audioTrack.applyConstraints({
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          });
+        } catch {
+          // Browsers vary on which constraints they accept on a
+          // display-media audio track; non-fatal.
+        }
+        // Tear down the audio track too if the user clicks the browser
+        // "Stop sharing" banner (which fires 'ended' on the video track
+        // first; we propagate to audio in the trackEndedHandler).
+        multiPeerWebRTCService.addLocalTrack(audioTrack, stream);
+      }
       this.active = true;
       this.events.onStarted?.();
       this.broadcastState();

@@ -169,10 +169,52 @@ class CameraService {
   }
 
   /**
+   * List available video input devices. Returns labels only when the
+   * user has previously granted camera permission (browser privacy);
+   * otherwise labels are empty strings and we have to display the
+   * deviceId instead. Useful for surfacing OBS Virtual Camera, DroidCam,
+   * external webcams, etc. as selectable options.
+   *
+   * Detection of OBS specifically: label contains 'OBS' (Windows /
+   * macOS / Linux all use that prefix). The caller can highlight it.
+   */
+  async listDevices(): Promise<MediaDeviceInfo[]> {
+    if (typeof navigator === 'undefined'
+        || typeof navigator.mediaDevices?.enumerateDevices !== 'function') {
+      return [];
+    }
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      return all.filter((d) => d.kind === 'videoinput');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Subscribe to device-list changes (camera plugged in or removed,
+   * OBS Virtual Camera started or stopped). Returns an unsubscribe.
+   */
+  onDevicesChanged(cb: () => void): () => void {
+    if (typeof navigator === 'undefined'
+        || typeof navigator.mediaDevices?.addEventListener !== 'function') {
+      return () => {};
+    }
+    navigator.mediaDevices.addEventListener('devicechange', cb);
+    return () => navigator.mediaDevices.removeEventListener('devicechange', cb);
+  }
+
+  /**
    * Request camera permission and start sharing video with every connected
    * peer. Refuses if the room is already at MAX_VIDEO_PEERS.
+   *
+   * @param opts.deviceId  Optional device ID from listDevices(). If
+   *                       omitted, the browser picks the default device,
+   *                       which is usually the built-in webcam (NOT the
+   *                       OBS Virtual Camera). Pass an explicit ID to
+   *                       force OBS or another device.
    */
-  async start(): Promise<void> {
+  async start(opts: { deviceId?: string } = {}): Promise<void> {
     if (this.active) return;
     if (this.countSharing() >= MAX_VIDEO_PEERS) {
       const err = new Error(
@@ -182,12 +224,19 @@ class CameraService {
       throw err;
     }
     try {
+      // ideal vs exact: ideal is a non-binding preference (browser will
+      // pick the closest available device if the named one is gone),
+      // exact would throw OverconstrainedError. ideal is the right call:
+      // if the user picks OBS and then closes OBS mid-call, we degrade
+      // to a real camera rather than failing.
+      const videoConstraints: MediaTrackConstraints = {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, max: 30 },
+      };
+      if (opts.deviceId) videoConstraints.deviceId = { ideal: opts.deviceId };
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 30 },
-        },
+        video: videoConstraints,
       });
       this.localStream = stream;
       for (const track of stream.getVideoTracks()) {
