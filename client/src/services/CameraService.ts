@@ -40,6 +40,17 @@ class CameraService {
   constructor() {
     multiPeerWebRTCService.on('onTrack', (peerId, stream, kind) => {
       if (kind !== 'video') return;
+      // Disambiguate camera vs screen-share streams (both arrive as
+      // kind=video). Only claim the stream if the peer has announced this
+      // streamId as their camera. If they have not announced anything yet,
+      // tentatively accept (legacy behavior); the screen-state handler in
+      // ScreenShareService will displace us if it turns out this stream is
+      // their screen capture.
+      const peer = useAppStore.getState().peers.get(peerId);
+      const announcedCamera = peer?.cameraState?.streamId;
+      const announcedScreen = peer?.screenState?.streamId;
+      if (announcedScreen && stream.id === announcedScreen) return;
+      if (announcedCamera && stream.id !== announcedCamera) return;
       this.remoteStreamsByPeer.set(peerId, stream);
       // Notify subscribers that a new stream is available for this peer.
       // RemoteVideos uses this to re-bind its <video> element rather than
@@ -57,7 +68,7 @@ class CameraService {
         const msg = JSON.parse(data) as DataChannelMessage;
         if (msg.type === 'camera-state') {
           useAppStore.getState().updatePeer(peerId, {
-            cameraState: { sharing: msg.sharing },
+            cameraState: { sharing: msg.sharing, streamId: msg.streamId },
           });
         }
       } catch {
@@ -179,6 +190,7 @@ class CameraService {
     const msg: DataChannelMessage = {
       type: 'camera-state',
       sharing: this.active,
+      streamId: this.localStream?.id,
     };
     multiPeerWebRTCService.broadcast(JSON.stringify(msg));
   }

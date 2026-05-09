@@ -9,6 +9,7 @@ import {
   verificationService,
   voiceService,
   cameraService,
+  screenShareService,
   chatService
 } from '../services';
 import { 
@@ -22,6 +23,8 @@ import {
   VoiceControls,
   CameraControls,
   RemoteVideos,
+  ScreenShareControls,
+  RemoteScreens,
   ChatPanel,
   Footer 
 } from '../components';
@@ -303,6 +306,7 @@ export default function MultiPeerSessionPage() {
       verificationService.reset();
       voiceService.reset();
       cameraService.reset();
+    screenShareService.reset();
       chatService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
@@ -489,6 +493,7 @@ export default function MultiPeerSessionPage() {
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
     cameraService.reset();
+    screenShareService.reset();
     chatService.reset();
     clearPeers();
     signalingService.disconnect();
@@ -600,6 +605,7 @@ export default function MultiPeerSessionPage() {
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
     cameraService.reset();
+    screenShareService.reset();
     chatService.reset();
     clearPeers();
     clearQueuedFiles();
@@ -806,6 +812,7 @@ export default function MultiPeerSessionPage() {
           <div className="mt-4 flex flex-wrap gap-3">
             <VoiceControls />
             <CameraControls />
+            <ScreenShareControls />
           </div>
         )}
 
@@ -813,6 +820,7 @@ export default function MultiPeerSessionPage() {
         {peers.size > 0 && (
           <div className="mt-4">
             <RemoteVideos peers={peers} />
+            <RemoteScreens peers={peers} />
           </div>
         )}
 

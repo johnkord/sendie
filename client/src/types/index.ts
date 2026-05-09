@@ -35,7 +35,14 @@ export interface PeerConnectionState {
   // have not received a voice-state message from them, treat as not sharing.
   voiceState: { sharing: boolean; muted: boolean } | null;
   // Video: state of the remote peer's outgoing video.
-  cameraState: { sharing: boolean } | null;
+  // streamId disambiguates the peer's camera track from their screen-share
+  // track (both arrive as kind=video). `null` until the peer's first
+  // camera-state message lands.
+  cameraState: { sharing: boolean; streamId?: string } | null;
+  // Screen sharing: state of the remote peer's outgoing screen capture.
+  // Same shape as cameraState; we keep it separate so the UI can render
+  // a screen tile distinctly from camera tiles.
+  screenState: { sharing: boolean; streamId?: string } | null;
 }
 
 export interface PeerInfo {
@@ -113,7 +120,11 @@ export type DataChannelMessage =
   // underlying audio is already silenced regardless of whether the
   // message arrives.
   | { type: 'voice-state'; muted: boolean; sharing: boolean }
-  | { type: 'camera-state'; sharing: boolean };
+  | { type: 'camera-state'; sharing: boolean; streamId?: string }
+  // Screen-share state. streamId lets the receiver match an incoming
+  // video track to the sender's intent (camera vs screen) since both
+  // arrive as kind=video.
+  | { type: 'screen-state'; sharing: boolean; streamId?: string };
 
 // Crypto Types
 export interface KeyPair {

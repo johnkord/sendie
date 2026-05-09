@@ -65,6 +65,13 @@ export class MultiPeerWebRTCService {
   // We add these to every existing peer connection plus any new ones.
   private localTracks: MediaStreamTrack[] = [];
   private localStream: MediaStream | null = null;
+  // Per-track stream tag. localStream above is kept for backwards-compat
+  // (single-stream callers use getLocalStream()), but when both camera and
+  // screen are active we have two distinct streams and need to associate
+  // each track with the right one for new-peer-join replays. Without this,
+  // a peer joining mid-share would see both tracks fused under whichever
+  // stream was most recently passed to addLocalTrack().
+  private trackStreams: Map<MediaStreamTrack, MediaStream> = new Map();
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -251,8 +258,9 @@ export class MultiPeerWebRTCService {
     // peer joined), add them now. This will trigger negotiationneeded.
     for (const track of this.localTracks) {
       try {
-        if (this.localStream) {
-          connection.addTrack(track, this.localStream);
+        const stream = this.trackStreams.get(track) ?? this.localStream;
+        if (stream) {
+          connection.addTrack(track, stream);
         } else {
           connection.addTrack(track);
         }
@@ -569,7 +577,10 @@ export class MultiPeerWebRTCService {
   addLocalTrack(track: MediaStreamTrack, stream?: MediaStream): void {
     if (this.localTracks.includes(track)) return;
     this.localTracks.push(track);
-    if (stream) this.localStream = stream;
+    if (stream) {
+      this.localStream = stream;
+      this.trackStreams.set(track, stream);
+    }
     for (const [peerId, info] of this.peerConnections) {
       try {
         if (stream) {
@@ -624,6 +635,7 @@ export class MultiPeerWebRTCService {
       // ignore
     }
     this.localTracks.splice(idx, 1);
+    this.trackStreams.delete(track);
     if (this.localTracks.length === 0) {
       this.localStream = null;
     }
