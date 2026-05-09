@@ -9,4 +9,5 @@ export { PeerList } from './PeerList';
 export { VoiceControls } from './VoiceControls';
 export { CameraControls } from './CameraControls';
 export { RemoteVideos } from './RemoteVideos';
+export { ChatPanel } from './ChatPanel';
 export { default as Footer } from './Footer';

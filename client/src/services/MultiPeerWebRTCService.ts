@@ -5,8 +5,10 @@ export type MultiPeerWebRTCEvents = {
   onPeerDisconnected: (peerId: string) => void;
   onDataChannelOpen: (peerId: string) => void;
   onDataChannelClose: (peerId: string) => void;
-  onDataChannelMessage: (peerId: string, data: ArrayBuffer | string) => void;
-  onError: (peerId: string, error: Error) => void;
+  onDataChannelMessage: (peerId: string, data: ArrayBuffer | string) => void;  // Chat channel uses a separate SCTP stream so file-transfer flow control
+  // does not head-of-line block messages.
+  onChatChannelOpen: (peerId: string) => void;
+  onChatMessage: (peerId: string, data: string) => void;  onError: (peerId: string, error: Error) => void;
   // PoC: voice/video. Fires when the remote peer adds a media track.
   // The page wires this to a hidden <audio autoplay>/<video> element.
   onTrack: (peerId: string, stream: MediaStream, kind: 'audio' | 'video') => void;
@@ -25,6 +27,9 @@ interface IceServerConfig {
 interface PeerConnectionInfo {
   connection: RTCPeerConnection;
   dataChannel: RTCDataChannel | null;
+  // Separate channel for human chat so file-transfer flow control does not
+  // delay messages. Same DTLS / SCTP transport, different SCTP stream.
+  chatChannel: RTCDataChannel | null;
   pendingCandidates: RTCIceCandidateInit[];
   // Perfect-negotiation per-peer state. See
   // https://w3c.github.io/webrtc-pc/#perfect-negotiation-example
@@ -156,6 +161,7 @@ export class MultiPeerWebRTCService {
     const peerInfo: PeerConnectionInfo = {
       connection,
       dataChannel: null,
+      chatChannel: null,
       pendingCandidates: [],
       makingOffer: false,
       ignoreOffer: false,
@@ -220,10 +226,16 @@ export class MultiPeerWebRTCService {
       }
     };
 
-    // Handle incoming data channel (when we're the answerer)
+    // Handle incoming data channel (when we're the answerer).
+    // Routed by label: 'fileTransfer' is the original payload channel,
+    // 'chat' is for human messages.
     connection.ondatachannel = (event) => {
-      console.log(`Received data channel from ${peerId}`);
-      this.setupDataChannel(peerId, event.channel);
+      console.log(`Received '${event.channel.label}' channel from ${peerId}`);
+      if (event.channel.label === 'chat') {
+        this.setupChatChannel(peerId, event.channel);
+      } else {
+        this.setupDataChannel(peerId, event.channel);
+      }
     };
 
     // Handle incoming media tracks (audio/video).
@@ -288,6 +300,33 @@ export class MultiPeerWebRTCService {
   }
 
   /**
+   * Set up a chat data channel for a peer. Separate from the main file
+   * transfer channel so chunks and chat messages don't head-of-line block
+   * each other.
+   */
+  private setupChatChannel(peerId: string, channel: RTCDataChannel): void {
+    const peerInfo = this.peerConnections.get(peerId);
+    if (!peerInfo) return;
+    peerInfo.chatChannel = channel;
+    channel.onopen = () => {
+      console.log(`Chat channel opened with ${peerId}`);
+      this.emit('onChatChannelOpen', peerId);
+    };
+    channel.onclose = () => {
+      console.log(`Chat channel closed with ${peerId}`);
+    };
+    channel.onerror = (error) => {
+      console.error(`Chat channel error with ${peerId}:`, error);
+    };
+    channel.onmessage = (event) => {
+      // Chat messages are JSON strings only.
+      if (typeof event.data === 'string') {
+        this.emit('onChatMessage', peerId, event.data);
+      }
+    };
+  }
+
+  /**
    * Initiate a connection to a specific peer (existing peer reaching out
    * to a newly-joined one). Creates the data channel; the perfect-negotiation
    * handler will produce the offer asynchronously.
@@ -306,6 +345,13 @@ export class MultiPeerWebRTCService {
       ordered: true,
     });
     this.setupDataChannel(peerId, channel);
+
+    // Open the chat channel alongside file transfer. Same DTLS handshake,
+    // separate SCTP stream so file flow control doesn't block chat.
+    const chat = peerInfo.connection.createDataChannel('chat', {
+      ordered: true,
+    });
+    this.setupChatChannel(peerId, chat);
   }
 
   /**
@@ -646,6 +692,54 @@ export class MultiPeerWebRTCService {
   }
 
   /**
+   * Send a chat message to a specific peer over the chat data channel.
+   * @returns true if the channel was open and the send was issued.
+   */
+  sendChatTo(peerId: string, data: string): boolean {
+    const peerInfo = this.peerConnections.get(peerId);
+    if (!peerInfo?.chatChannel || peerInfo.chatChannel.readyState !== 'open') {
+      return false;
+    }
+    try {
+      peerInfo.chatChannel.send(data);
+      return true;
+    } catch (error) {
+      console.error(`Failed to send chat to ${peerId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Broadcast a chat message to every peer whose chat channel is open.
+   */
+  broadcastChat(data: string): { success: string[]; failed: string[] } {
+    const success: string[] = [];
+    const failed: string[] = [];
+    for (const [peerId, peerInfo] of this.peerConnections) {
+      if (peerInfo.chatChannel?.readyState === 'open') {
+        try {
+          peerInfo.chatChannel.send(data);
+          success.push(peerId);
+        } catch (error) {
+          console.error(`Failed to broadcast chat to ${peerId}:`, error);
+          failed.push(peerId);
+        }
+      } else {
+        failed.push(peerId);
+      }
+    }
+    return { success, failed };
+  }
+
+  /**
+   * Whether the chat channel is open for a peer.
+   */
+  isChatChannelOpen(peerId: string): boolean {
+    const info = this.peerConnections.get(peerId);
+    return info?.chatChannel?.readyState === 'open';
+  }
+
+  /**
    * Get all peers with open data channels
    */
   getOpenChannels(): string[] {
@@ -733,6 +827,9 @@ export class MultiPeerWebRTCService {
 
     if (peerInfo.dataChannel) {
       peerInfo.dataChannel.close();
+    }
+    if (peerInfo.chatChannel) {
+      peerInfo.chatChannel.close();
     }
     peerInfo.connection.close();
     this.peerConnections.delete(peerId);

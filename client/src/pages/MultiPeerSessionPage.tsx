@@ -8,7 +8,8 @@ import {
   multiPeerFileTransferService,
   verificationService,
   voiceService,
-  cameraService
+  cameraService,
+  chatService
 } from '../services';
 import { 
   FileDropZone, 
@@ -21,6 +22,7 @@ import {
   VoiceControls,
   CameraControls,
   RemoteVideos,
+  ChatPanel,
   Footer 
 } from '../components';
 import type { KeyPair } from '../types';
@@ -282,6 +284,7 @@ export default function MultiPeerSessionPage() {
       verificationService.reset();
       voiceService.reset();
       cameraService.reset();
+      chatService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
       signalingService.disconnect();
@@ -467,6 +470,7 @@ export default function MultiPeerSessionPage() {
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
     cameraService.reset();
+    chatService.reset();
     clearPeers();
     signalingService.disconnect();
     navigate('/', { state: { kicked: true } });
@@ -577,6 +581,7 @@ export default function MultiPeerSessionPage() {
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
     cameraService.reset();
+    chatService.reset();
     clearPeers();
     clearQueuedFiles();
     setBroadcastMode(false);
@@ -789,6 +794,14 @@ export default function MultiPeerSessionPage() {
         {peers.size > 0 && (
           <div className="mt-4">
             <RemoteVideos peers={peers} />
+          </div>
+        )}
+
+        {/* Chat: separate data channel so file transfer flow control does
+            not delay messages. Plain text only. */}
+        {peers.size > 0 && (
+          <div className="mt-4">
+            <ChatPanel />
           </div>
         )}
 

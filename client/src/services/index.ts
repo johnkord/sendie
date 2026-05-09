@@ -6,5 +6,7 @@ export { verificationService } from './VerificationService';
 export type { VerificationResult } from './VerificationService';
 export { voiceService } from './VoiceService';
 export { cameraService, MAX_VIDEO_PEERS } from './CameraService';
+export { chatService } from './ChatService';
+export type { ChatMessage } from './ChatService';
 export { authService } from './AuthService';
 export type { User, AllowedUser, AdminUsersResponse } from './AuthService';
