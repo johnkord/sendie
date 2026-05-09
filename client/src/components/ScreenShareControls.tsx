@@ -85,7 +85,11 @@ export function ScreenShareControls() {
             title={
               supported
                 ? `Share your screen (max ${MAX_SCREEN_PEERS} simultaneous shares in the room)`
-                : 'Screen sharing requires a desktop browser (not supported on mobile)'
+                // iOS Safari has never implemented getDisplayMedia and Apple
+                // shows no signs of changing that. Android browsers also
+                // don't support it. Be specific so users don't go hunting
+                // for a setting that doesn't exist.
+                : 'Screen sharing is not supported in mobile browsers (Apple has not implemented getDisplayMedia on iOS Safari, and Chrome/Firefox on Android also lack support). Use a desktop browser to share your screen.'
             }
           >
             <span>🖥️</span>

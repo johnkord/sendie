@@ -652,6 +652,55 @@ export class MultiPeerWebRTCService {
   }
 
   /**
+   * Replace the currently-sent video track with a new one, in place,
+   * across every peer connection. Uses RTCRtpSender.replaceTrack which
+   * does NOT trigger renegotiation; the receiver's stream stays bound,
+   * its track id changes underneath, and they see the new feed
+   * seamlessly.
+   *
+   * Returns true if at least one sender was matched (in which case the
+   * caller should not also call addLocalTrack), false if no matching
+   * sender was found (in which case the caller falls back to
+   * remove+add).
+   */
+  replaceLocalVideoTrack(newTrack: MediaStreamTrack): boolean {
+    if (newTrack.kind !== 'video') return false;
+    let matched = false;
+    // Find the existing video track index in localTracks; replace there
+    // so the trackStreams + localStream bookkeeping stays consistent.
+    const oldIndex = this.localTracks.findIndex((t) => t.kind === 'video');
+    if (oldIndex < 0) return false;
+    const oldTrack = this.localTracks[oldIndex];
+    const stream = this.trackStreams.get(oldTrack);
+
+    for (const [peerId, info] of this.peerConnections) {
+      try {
+        const sender = info.connection
+          .getSenders()
+          .find((s) => s.track === oldTrack || s.track?.kind === 'video');
+        if (sender) {
+          // replaceTrack returns a Promise; we don't await per peer
+          // because we want to fire them in parallel. Failures are
+          // logged but non-fatal.
+          sender.replaceTrack(newTrack).catch((err) => {
+            console.warn(`replaceTrack failed for ${peerId}:`, err);
+          });
+          matched = true;
+        }
+      } catch (err) {
+        console.warn(`replaceTrack threw for ${peerId}:`, err);
+      }
+    }
+
+    if (matched) {
+      this.localTracks[oldIndex] = newTrack;
+      this.trackStreams.delete(oldTrack);
+      if (stream) this.trackStreams.set(newTrack, stream);
+    }
+    return matched;
+  }
+
+  /**
    * Get the currently-shared local stream, if any. Useful for self-meter
    * and self-preview.
    */

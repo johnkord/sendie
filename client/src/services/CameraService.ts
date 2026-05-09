@@ -252,6 +252,78 @@ class CameraService {
   }
 
   /**
+   * Switch to a different camera device while sharing. Stops the current
+   * track, opens a new stream from the requested device, and replaces
+   * the track on every peer connection's RTCRtpSender via replaceTrack
+   * if available, falling back to remove+add.
+   *
+   * On iOS this is also how we expose the front/back camera switcher:
+   * the user picks a device id from the dropdown without having to stop
+   * and restart the share.
+   */
+  async switchDevice(deviceId: string): Promise<void> {
+    if (!this.active) {
+      // Not sharing yet; just remember the choice for next start().
+      // Caller stores the deviceId in localStorage already.
+      return;
+    }
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: deviceId ? { ideal: deviceId } : undefined,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 },
+        },
+      });
+      const newTrack = newStream.getVideoTracks()[0];
+      if (!newTrack) {
+        for (const t of newStream.getTracks()) t.stop();
+        throw new Error('Switch returned no video track');
+      }
+
+      // Stop the old tracks but keep the same MediaStream object so
+      // self-preview and remote-stream id continuity hold; receivers
+      // that match on streamId would otherwise lose us.
+      const oldTracks = this.localStream?.getVideoTracks() ?? [];
+      const oldStream = this.localStream;
+
+      // Try to replaceTrack on every peer's sender for a seamless swap
+      // (no SDP renegotiation, no track-id change at the receiver).
+      const replaced = multiPeerWebRTCService.replaceLocalVideoTrack?.(newTrack);
+
+      if (!replaced) {
+        // Fallback path: remove old, add new. Triggers renegotiation.
+        for (const t of oldTracks) {
+          multiPeerWebRTCService.removeLocalTrack(t);
+        }
+        multiPeerWebRTCService.addLocalTrack(newTrack, oldStream ?? newStream);
+      }
+
+      // Splice tracks into the existing local MediaStream so the
+      // <video srcObject> binding doesn't blink.
+      if (oldStream) {
+        for (const t of oldTracks) {
+          oldStream.removeTrack(t);
+          t.stop();
+        }
+        oldStream.addTrack(newTrack);
+        // Discard the wrapper stream, we only wanted its track.
+        for (const t of newStream.getTracks()) {
+          if (t !== newTrack) t.stop();
+        }
+      } else {
+        this.localStream = newStream;
+      }
+      // Stream id may have changed if we swapped streams; re-broadcast.
+      this.broadcastState();
+    } catch (err) {
+      this.events.onError?.(err as Error);
+      throw err;
+    }
+  }
+
+  /**
    * Stop sharing video and release the camera.
    */
   async stop(): Promise<void> {

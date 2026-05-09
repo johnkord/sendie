@@ -67,10 +67,38 @@ export function CameraControls() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Bind the local stream to the preview <video> whenever active flips.
+  // Bind the local stream to the preview <video>. Two iOS Safari
+  // gotchas resolved here:
+  //   1. Render the <video> element ALWAYS (visibility-hidden, not
+  //      conditional render) so the ref is stable. iOS's autoplay
+  //      heuristic checks if the element is in the DOM at the moment
+  //      the muted+playsinline element gets a stream; conditional
+  //      render races that check.
+  //   2. Explicitly call play() after assigning srcObject. The
+  //      autoPlay attribute alone is unreliable on iOS for streams
+  //      attached via srcObject (vs <source> URLs).
+  // Both happen in the same effect so a re-render that changes
+  // active to true re-binds the stream and kicks play() again.
   useEffect(() => {
-    if (!previewRef.current) return;
-    previewRef.current.srcObject = active ? cameraService.getLocalStream() : null;
+    const el = previewRef.current;
+    if (!el) return;
+    const stream = active ? cameraService.getLocalStream() : null;
+    if (el.srcObject !== stream) {
+      el.srcObject = stream;
+    }
+    if (stream) {
+      // muted is required by iOS autoplay policy. Set as an HTML
+      // boolean attribute too, not only the property, because some
+      // older iOS versions only honor the attribute form.
+      el.muted = true;
+      el.setAttribute('muted', '');
+      // play() returns a promise; failure is non-fatal (we already
+      // have autoPlay+playsInline as a fallback) but log so we can
+      // diagnose if iOS ever changes again.
+      el.play().catch((err) => {
+        console.warn('Self-preview play() rejected:', err);
+      });
+    }
   }, [active]);
 
   const handleStart = async () => {
@@ -86,13 +114,23 @@ export function CameraControls() {
     await cameraService.stop();
   };
 
-  const handleDeviceChange = (id: string) => {
+  const handleDeviceChange = async (id: string) => {
     setDeviceId(id);
     try {
       if (id) localStorage.setItem(STORAGE_KEY, id);
       else localStorage.removeItem(STORAGE_KEY);
     } catch {
       // ignore
+    }
+    // Hot-swap if currently sharing. switchDevice replaceTrack-s into
+    // every peer connection without renegotiation, so the receivers
+    // see a seamless feed change rather than a brief blackout.
+    if (cameraService.isActive()) {
+      try {
+        await cameraService.switchDevice(id);
+      } catch (err) {
+        setError((err as Error).message ?? 'Could not switch camera');
+      }
     }
   };
 
@@ -106,53 +144,71 @@ export function CameraControls() {
     return raw;
   };
 
+  // Picker dropdown rendered in both states. When inactive AND we have
+  // no device labels yet (no permission ever granted), show a single
+  // 'Default device' option so the user can still launch; on iOS the
+  // dropdown would otherwise be empty until first start.
+  const showPicker = devices.length > 1
+    || (devices.length > 0 && devices.some((d) => d.label));
+
   return (
     <div className="flex items-center gap-3 flex-wrap">
       {!active ? (
-        <>
-          <button
-            onClick={handleStart}
-            className="px-3 py-1.5 rounded-md text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors flex items-center gap-2"
-            title={`Start camera (max ${MAX_VIDEO_PEERS} simultaneous video streams)`}
-          >
-            <span>📹</span>
-            <span>Start camera</span>
-          </button>
-          {devices.length > 1 && (
-            <select
-              value={deviceId}
-              onChange={(e) => handleDeviceChange(e.target.value)}
-              className="text-xs bg-slate-950/60 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-blue-500 max-w-[18rem]"
-              title="Pick a video input device, including OBS Virtual Camera if running."
-            >
-              <option value="">Default device</option>
-              {devices.map((d, i) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {formatLabel(d, i)}
-                </option>
-              ))}
-            </select>
-          )}
-        </>
+        <button
+          onClick={handleStart}
+          className="px-3 py-1.5 rounded-md text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors flex items-center gap-2"
+          title={`Start camera (max ${MAX_VIDEO_PEERS} simultaneous video streams)`}
+        >
+          <span aria-hidden>📹</span>
+          <span>Start camera</span>
+        </button>
       ) : (
-        <>
-          <button
-            onClick={handleStop}
-            className="px-3 py-1.5 rounded-md text-sm font-medium bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-600/50 transition-colors"
-            title="Stop sharing video"
-          >
-            ⏹ Stop
-          </button>
-          <video
-            ref={previewRef}
-            autoPlay
-            muted
-            playsInline
-            className="h-16 w-auto rounded border border-gray-600 bg-black"
-            title="Self preview"
-          />
-        </>
+        <button
+          onClick={handleStop}
+          className="px-3 py-1.5 rounded-md text-sm font-medium bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-600/50 transition-colors"
+          title="Stop sharing video"
+        >
+          ⏹ Stop
+        </button>
       )}
+
+      {/*
+        Device picker visible in BOTH states. Hidden if we only know of
+        the single default device (most desktops with one webcam). On
+        iOS the user has multiple cameras (front, back, ultra-wide),
+        and being able to switch mid-share is the natural way to flip
+        between front and back without stopping the call.
+      */}
+      {showPicker && (
+        <select
+          value={deviceId}
+          onChange={(e) => void handleDeviceChange(e.target.value)}
+          className="text-xs bg-slate-950/60 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-blue-500 max-w-[18rem]"
+          title="Pick a video input device. On phones this includes front and back cameras."
+        >
+          <option value="">Default device</option>
+          {devices.map((d, i) => (
+            <option key={d.deviceId} value={d.deviceId}>
+              {formatLabel(d, i)}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {/*
+        Self-preview video element rendered ALWAYS so iOS Safari sees a
+        stable element when the muted+playsinline+autoPlay heuristics
+        run after srcObject assignment. Hidden visually when not active.
+      */}
+      <video
+        ref={previewRef}
+        autoPlay
+        muted
+        playsInline
+        className={`h-16 w-auto rounded border border-slate-700 bg-black ${active ? '' : 'hidden'}`}
+        title="Self preview"
+      />
+
       {error && <span className="text-xs text-red-400 ml-2">{error}</span>}
     </div>
   );
