@@ -30,32 +30,31 @@ export function SessionLink({ sessionId, sessionSecret }: SessionLinkProps) {
   }, [shareUrl]);
 
   return (
-    <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-      <p className="text-sm text-gray-400 mb-2">
-        Share this link with someone to start transferring files:
+    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-slate-500 mb-2">
+        Invite link
       </p>
-      
-      <div className="flex items-center gap-2">
+      <div className="flex items-stretch gap-2">
         <input
           type="text"
           value={shareUrl}
           readOnly
-          className="flex-1 bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm font-mono"
+          className="flex-1 min-w-0 bg-slate-950/60 border border-slate-700 rounded-md px-3 py-1.5 text-slate-200 text-xs font-mono focus:outline-none focus:border-purple-500"
           onClick={(e) => e.currentTarget.select()}
+          title="Click to select, then copy"
         />
-        
         <button
           onClick={handleCopy}
           className={`
-            px-4 py-2 rounded-lg font-medium transition-all
-            ${copied 
-              ? 'bg-green-600 text-white' 
+            shrink-0 px-3 py-1.5 rounded-md text-sm font-medium transition-all
+            ${copied
+              ? 'bg-emerald-600 text-white'
               : 'bg-purple-600 hover:bg-purple-700 text-white'
             }
           `}
           title="Copy session link to clipboard"
         >
-          {copied ? '✓ Copied!' : 'Copy'}
+          {copied ? '✓' : 'Copy'}
         </button>
       </div>
     </div>

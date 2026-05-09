@@ -119,7 +119,7 @@ describe('ConnectionStatusDisplay', () => {
       />
     );
     
-    expect(screen.getByText(/3 peers connected/)).toBeInTheDocument();
+    expect(screen.getByText(/3\/10 peers/)).toBeInTheDocument();
   });
 
   it('should show max peers for multi-peer sessions', () => {
@@ -133,7 +133,7 @@ describe('ConnectionStatusDisplay', () => {
       />
     );
     
-    expect(screen.getByText(/max 10/)).toBeInTheDocument();
+    expect(screen.getByText(/2\/10 peers/)).toBeInTheDocument();
   });
 
   it('should not display error when null', () => {

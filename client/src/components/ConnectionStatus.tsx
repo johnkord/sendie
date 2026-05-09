@@ -29,34 +29,33 @@ export function ConnectionStatusDisplay({
   const isRateLimitError = error?.includes('wait') || error?.includes('⏱️');
 
   return (
-    <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-      <div className="flex items-center justify-between">
+    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-4">
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className={`text-xl ${config.color}`}>{config.icon}</span>
-          <span className={`font-medium ${config.color}`}>{config.label}</span>
+          <span className={`text-lg ${config.color}`} aria-hidden>{config.icon}</span>
+          <span className={`text-sm font-medium ${config.color}`}>{config.label}</span>
         </div>
-        
+
         {connectedPeerCount > 0 && (
-          <span className="text-sm text-gray-400">
-            {connectedPeerCount} peer{connectedPeerCount !== 1 ? 's' : ''} connected
-            {maxPeers > 2 && ` (max ${maxPeers})`}
+          <span className="text-xs text-slate-500">
+            {connectedPeerCount}/{maxPeers > 2 ? maxPeers : 2} peers
           </span>
         )}
       </div>
 
       {sessionId && (
-        <p className="text-sm text-gray-400 mt-2">
-          Session: <code className="bg-gray-700 px-2 py-0.5 rounded">{sessionId}</code>
+        <p className="mt-2 text-xs text-slate-500">
+          Session <code className="ml-1 bg-slate-800/80 px-1.5 py-0.5 rounded text-slate-300 font-mono">{sessionId}</code>
         </p>
       )}
 
       {error && (
         <div className="mt-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
           <div className="flex items-start gap-2">
-            <span className="text-red-400 flex-shrink-0">
+            <span className="text-red-400 flex-shrink-0" aria-hidden>
               {isRateLimitError ? '⏱️' : '⚠️'}
             </span>
-            <p className="text-sm text-red-400">
+            <p className="text-sm text-red-300">
               {error}
             </p>
           </div>

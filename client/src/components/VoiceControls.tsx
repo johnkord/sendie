@@ -68,7 +68,7 @@ export function VoiceControls() {
   };
 
   return (
-    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700 flex items-center gap-3">
+    <div className="flex items-center gap-3 flex-wrap">
       {!active ? (
         <button
           onClick={handleStart}

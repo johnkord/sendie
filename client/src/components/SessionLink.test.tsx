@@ -53,14 +53,14 @@ describe('SessionLink', () => {
     fireEvent.click(copyButton);
     
     await waitFor(() => {
-      expect(screen.getByText('✓ Copied!')).toBeInTheDocument();
+      expect(screen.getByText('✓')).toBeInTheDocument();
     });
   });
 
-  it('should display instruction text', () => {
+  it('should display invite link header', () => {
     render(<SessionLink sessionId="abc123" sessionSecret="secret456" />);
-    
-    expect(screen.getByText(/Share this link/)).toBeInTheDocument();
+
+    expect(screen.getByText(/Invite link/i)).toBeInTheDocument();
   });
 
   it('should have read-only input', () => {

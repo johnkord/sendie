@@ -654,239 +654,216 @@ export default function MultiPeerSessionPage() {
   const canQueueFiles = !canSendFiles && peers.size === 0 && !hostOnlyRestricted;
 
   return (
-    <div className="min-h-screen p-4 md:p-8 relative">
+    <div className="min-h-screen p-4 md:p-6 relative">
       <UserHeader />
-      
-      <div className="max-w-2xl mx-auto pt-12">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <h1 
-            className="text-2xl font-bold text-white cursor-pointer hover:text-gray-300 transition-colors"
+
+      <div className="mx-auto max-w-6xl pt-12">
+        {/* Header bar. Sticky on desktop so the leave button + auto-receive
+            toggle stay reachable while scrolling through transfers. */}
+        <header className="mb-6 flex items-center justify-between gap-3">
+          <h1
+            className="flex items-center gap-2 text-2xl font-bold text-white cursor-pointer hover:text-slate-300 transition-colors"
             onClick={() => navigate('/')}
             title="Go to home page"
           >
-            📤 Sendie
+            <span aria-hidden>📤</span>
+            <span>Sendie</span>
           </h1>
-          <div className="flex items-center gap-4">
-            {/* Auto-receive toggle */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-400">Auto-receive</span>
+          <div className="flex items-center gap-3">
+            <label
+              className="flex items-center gap-2 text-xs text-slate-400 select-none"
+              title={autoReceive ? 'Auto-receive enabled' : 'Auto-receive disabled'}
+            >
+              <span>Auto-receive</span>
               <button
                 onClick={handleToggleAutoReceive}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  autoReceive ? 'bg-green-600' : 'bg-gray-600'
+                  autoReceive ? 'bg-emerald-500' : 'bg-slate-600'
                 }`}
-                title={autoReceive ? 'Auto-receive enabled' : 'Auto-receive disabled'}
               >
                 <span
-                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
                     autoReceive ? 'translate-x-5' : 'translate-x-1'
                   }`}
                 />
               </button>
-            </div>
+            </label>
             <button
               onClick={handleLeaveSession}
-              className="px-4 py-2 text-gray-400 hover:text-white transition-colors"
+              className="px-3 py-1.5 rounded-md text-sm text-slate-300 hover:text-white hover:bg-white/5 transition-colors"
               title="Leave this session and return to home"
             >
-              Leave Session
+              Leave session
             </button>
           </div>
-        </div>
+        </header>
 
-        {/* Connection Status */}
-        <ConnectionStatusDisplay
-          status={connection.status}
-          sessionId={connection.sessionId}
-          connectedPeerCount={connectedPeerCount}
-          maxPeers={connection.maxPeers}
-          error={connection.error}
-        />
-
-        {/* Session Controls (Host Only) */}
-        {connection.isHost && (
-          <div className="mt-4 p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-yellow-400">👑</span>
-                <span className="text-sm font-medium text-gray-300">Host Controls</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleToggleHostOnlySending}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                    connection.isHostOnlySending
-                      ? 'bg-purple-600/20 text-purple-400 hover:bg-purple-600/30 border border-purple-600/50'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
-                  }`}
-                  title={connection.isHostOnlySending ? 'Only you can send files' : 'Everyone can send files'}
-                >
-                  {connection.isHostOnlySending ? (
-                    <>
-                      <span>📤</span>
-                      <span>Host Only</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>👥</span>
-                      <span>Everyone</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={handleToggleLock}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                    connection.isLocked
-                      ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/50'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
-                  }`}
-                  title={connection.isLocked ? 'Unlock session to allow new people to join' : 'Lock session to prevent new people from joining'}
-                >
-                  {connection.isLocked ? (
-                    <>
-                      <span>🔒</span>
-                      <span>Locked</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>🔓</span>
-                      <span>Unlocked</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-            <div className="mt-2 text-xs text-gray-500 space-y-1">
-              {connection.isHostOnlySending && (
-                <p>Only you can send files in this session.</p>
-              )}
-              {connection.isLocked && (
-                <p>New people cannot join this session while it's locked.</p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Locked Session Indicator (for non-hosts) */}
-        {!connection.isHost && connection.isLocked && (
-          <div className="mt-4 p-3 bg-gray-800/50 rounded-lg border border-gray-700 flex items-center gap-2">
-            <span>🔒</span>
-            <span className="text-sm text-gray-400">This session is locked by the host</span>
-          </div>
-        )}
-
-        {/* Host-Only Sending Indicator (for non-hosts) */}
-        {!connection.isHost && connection.isHostOnlySending && (
-          <div className="mt-4 p-3 bg-gray-800/50 rounded-lg border border-purple-600/30 flex items-center gap-2">
-            <span>📤</span>
-            <span className="text-sm text-purple-400">Only the host can send files in this session</span>
-          </div>
-        )}
-
-        {/* Session Link (for waiting for peers) */}
-        {(connection.status === 'waiting-for-peer' || peers.size < connection.maxPeers - 1) && sessionId && !connection.isLocked && (
-          <div className="mt-4">
-            <SessionLink sessionId={sessionId} sessionSecret={sessionSecretRef.current ?? ''} />
-          </div>
-        )}
-
-        {/* Peer List */}
-        {(peers.size > 0 || connection.localFriendlyName) && (
-          <div className="mt-4">
-            <PeerList 
-              peers={peers}
-              localFriendlyName={connection.localFriendlyName}
-              onRemovePeer={handleDisconnectPeer}
-              onKickPeer={connection.isHost ? handleKickPeer : undefined}
-              isHost={connection.isHost}
-              hostConnectionId={connection.hostConnectionId}
+        {/* Two-column layout: sidebar (left) + main (right) on lg+.
+            Single-column on mobile. The sidebar is visually quieter so
+            the main column (drop zone, transfers, live screens) reads
+            as the primary surface. */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          {/* ---------- SIDEBAR ---------- */}
+          <aside className="space-y-4 lg:col-span-4 xl:col-span-3">
+            <ConnectionStatusDisplay
+              status={connection.status}
+              sessionId={connection.sessionId}
+              connectedPeerCount={connectedPeerCount}
+              maxPeers={connection.maxPeers}
+              error={connection.error}
             />
-          </div>
-        )}
 
-        {/* Voice PoC: Start / Stop / Mute. Renders inert until the user
-            explicitly clicks Start. Currently audio-only; see
-            docs/voice-poc-notes.md and the realtime-av proposal. */}
-        {peers.size > 0 && (
-          <div className="mt-4 flex flex-wrap gap-3">
-            <VoiceControls />
-            <CameraControls />
-            <ScreenShareControls />
-          </div>
-        )}
+            {/* Host controls: compact strip rather than a full card. */}
+            {connection.isHost && (
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3">
+                <div className="mb-2 flex items-center gap-2 text-xs font-medium text-amber-300/80 uppercase tracking-wide">
+                  <span aria-hidden>👑</span>
+                  <span>Host controls</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={handleToggleHostOnlySending}
+                    className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      connection.isHostOnlySending
+                        ? 'bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 border border-purple-500/30'
+                        : 'bg-slate-800/60 text-slate-300 hover:bg-slate-700/60 border border-slate-700'
+                    }`}
+                    title={connection.isHostOnlySending ? 'Only you can send files' : 'Everyone can send files'}
+                  >
+                    <span aria-hidden>{connection.isHostOnlySending ? '📤' : '👥'}</span>
+                    <span>{connection.isHostOnlySending ? 'Host only' : 'Everyone'}</span>
+                  </button>
+                  <button
+                    onClick={handleToggleLock}
+                    className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      connection.isLocked
+                        ? 'bg-red-500/15 text-red-300 hover:bg-red-500/25 border border-red-500/30'
+                        : 'bg-slate-800/60 text-slate-300 hover:bg-slate-700/60 border border-slate-700'
+                    }`}
+                    title={connection.isLocked ? 'Unlock session to allow new people to join' : 'Lock session to prevent new people from joining'}
+                  >
+                    <span aria-hidden>{connection.isLocked ? '🔒' : '🔓'}</span>
+                    <span>{connection.isLocked ? 'Locked' : 'Unlocked'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
-        {/* Remote video tiles for peers who are sharing camera. */}
-        {peers.size > 0 && (
-          <div className="mt-4">
-            <RemoteVideos peers={peers} />
-            <RemoteScreens peers={peers} />
-          </div>
-        )}
+            {/* Non-host indicators when restricted. Compact pill rather
+                than a full card. */}
+            {!connection.isHost && connection.isLocked && (
+              <div className="flex items-center gap-2 rounded-md border border-slate-700/50 bg-slate-900/40 px-3 py-2 text-xs text-slate-300">
+                <span aria-hidden>🔒</span>
+                <span>This session is locked by the host</span>
+              </div>
+            )}
+            {!connection.isHost && connection.isHostOnlySending && (
+              <div className="flex items-center gap-2 rounded-md border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-xs text-purple-200">
+                <span aria-hidden>📤</span>
+                <span>Only the host can send files in this session</span>
+              </div>
+            )}
 
-        {/* Chat: separate data channel so file transfer flow control does
-            not delay messages. Plain text only. */}
-        {peers.size > 0 && (
-          <div className="mt-4">
-            <ChatPanel />
-          </div>
-        )}
+            {/* Session link: only while still seeking peers. */}
+            {(connection.status === 'waiting-for-peer' || peers.size < connection.maxPeers - 1) && sessionId && !connection.isLocked && (
+              <SessionLink sessionId={sessionId} sessionSecret={sessionSecretRef.current ?? ''} />
+            )}
 
-        {/* File Queue & Broadcast Mode Toggle */}
-        {(canSendFiles || canQueueFiles || queuedFiles.length > 0) && (
-          <div className="mt-6">
-            <FileQueue
-              queuedFiles={queuedFiles}
-              broadcastMode={broadcastMode}
-              onRemoveFile={removeQueuedFile}
-              onClearQueue={clearQueuedFiles}
-              onToggleBroadcastMode={handleToggleBroadcastMode}
-            />
-          </div>
-        )}
-
-        {/* File Drop Zone */}
-        <div className="mt-6">
-          <FileDropZone
-            onFilesSelected={handleFilesSelected}
-            disabled={!canSendFiles && !canQueueFiles}
-            disabledMessage={hostOnlyRestricted ? 'Only the host can send files in this session' : undefined}
-          />
-        </div>
-
-        {/* Active Transfers */}
-        {transfers.length > 0 && (
-          <div className="mt-6 space-y-3">
-            <h2 className="text-lg font-semibold text-white">Transfers</h2>
-            {transfers.map((transfer) => (
-              <TransferProgress
-                key={transfer.fileId}
-                transfer={transfer}
-                onCancel={
-                  transfer.status === 'transferring' || transfer.status === 'pending'
-                    ? () => handleCancelTransfer(transfer.fileId)
-                    : undefined
-                }
+            {(peers.size > 0 || connection.localFriendlyName) && (
+              <PeerList
+                peers={peers}
+                localFriendlyName={connection.localFriendlyName}
+                onRemovePeer={handleDisconnectPeer}
+                onKickPeer={connection.isHost ? handleKickPeer : undefined}
+                isHost={connection.isHost}
+                hostConnectionId={connection.hostConnectionId}
               />
-            ))}
-          </div>
-        )}
+            )}
 
-        {/* Help Text */}
-        <div className="mt-8 text-center text-gray-500 text-sm">
-          {connection.status === 'waiting-for-peer' && queuedFiles.length === 0 && (
-            <p>Share the link above with others to connect and start transferring files.</p>
-          )}
-          {connection.status === 'waiting-for-peer' && queuedFiles.length > 0 && (
-            <p>Files queued! They'll be sent automatically when someone joins.</p>
-          )}
-          {isConnected && (
-            <p>
-              Files are broadcast to all connected peers using WebRTC.
-              <br />
-              All transfers are end-to-end encrypted.
-            </p>
-          )}
+            {/* Live-share controls grouped into a single section so they
+                read as one capability ("share live media") instead of
+                three separate gizmos. */}
+            {peers.size > 0 && (
+              <section
+                className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3 space-y-2"
+                aria-label="Live sharing"
+              >
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                  Share live
+                </div>
+                <VoiceControls />
+                <CameraControls />
+                <ScreenShareControls />
+              </section>
+            )}
+
+            {peers.size > 0 && <ChatPanel />}
+          </aside>
+
+          {/* ---------- MAIN ---------- */}
+          <main className="space-y-6 lg:col-span-8 xl:col-span-9">
+            {/* Live remote tiles dominate when active. */}
+            {peers.size > 0 && (
+              <div className="space-y-4">
+                <RemoteScreens peers={peers} />
+                <RemoteVideos peers={peers} />
+              </div>
+            )}
+
+            {/* Active transfers are the second priority once the room
+                has live activity. */}
+            {transfers.length > 0 && (
+              <section className="space-y-3" aria-label="Active transfers">
+                <div className="flex items-baseline justify-between">
+                  <h2 className="text-lg font-semibold text-white">Transfers</h2>
+                  <span className="text-xs text-slate-500">
+                    {transfers.length} item{transfers.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                {transfers.map((transfer) => (
+                  <TransferProgress
+                    key={transfer.fileId}
+                    transfer={transfer}
+                    onCancel={
+                      transfer.status === 'transferring' || transfer.status === 'pending'
+                        ? () => handleCancelTransfer(transfer.fileId)
+                        : undefined
+                    }
+                  />
+                ))}
+              </section>
+            )}
+
+            {/* File queue surfaces ahead of the drop zone when present. */}
+            {(canSendFiles || canQueueFiles || queuedFiles.length > 0) && (
+              <FileQueue
+                queuedFiles={queuedFiles}
+                broadcastMode={broadcastMode}
+                onRemoveFile={removeQueuedFile}
+                onClearQueue={clearQueuedFiles}
+                onToggleBroadcastMode={handleToggleBroadcastMode}
+              />
+            )}
+
+            {/* Drop zone: this is THE primary action of the page, so
+                it gets emphasis. The component renders larger when no
+                transfers are active to draw the eye. */}
+            <FileDropZone
+              onFilesSelected={handleFilesSelected}
+              disabled={!canSendFiles && !canQueueFiles}
+              disabledMessage={hostOnlyRestricted ? 'Only the host can send files in this session' : undefined}
+              variant={transfers.length === 0 ? 'hero' : 'compact'}
+            />
+
+            {/* Inline help only when it adds new info that the buttons
+                don't already convey. The "all transfers are E2E
+                encrypted" line lives in the Footer; no need to repeat. */}
+            {connection.status === 'waiting-for-peer' && queuedFiles.length > 0 && (
+              <p className="text-center text-sm text-slate-400">
+                Files queued. They'll send automatically when someone joins.
+              </p>
+            )}
+          </main>
         </div>
 
         <Footer />
