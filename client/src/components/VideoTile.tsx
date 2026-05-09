@@ -84,6 +84,28 @@ export function VideoTile({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const innerVideoRef = useRef<HTMLVideoElement | null>(null);
   const [controlsVisible, setControlsVisible] = useState(false);
+  // Track our own fullscreen state so we can swap the enter/exit
+  // button rather than always showing both. fullscreenchange fires on
+  // both standard and webkit-prefixed APIs.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as IOSDoc;
+      const fsEl = document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+      // Treat "in fullscreen" as "this tile's container or its video is
+      // the fullscreen element". Comparing to null catches the exit
+      // case on both standard and webkit-prefixed APIs.
+      setIsFullscreen(
+        fsEl === containerRef.current || fsEl === innerVideoRef.current,
+      );
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, []);
 
   // Forward our internal ref to the optional caller-supplied ref.
   const setVideoRef = (el: HTMLVideoElement | null) => {
@@ -184,26 +206,30 @@ export function VideoTile({
         `}
       >
         {rightControls}
-        <button
-          onClick={handleFullscreen}
-          className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white transition-colors"
-          title="Fullscreen"
-          aria-label="Fullscreen"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M3 8V3h5M21 8V3h-5M3 16v5h5M21 16v5h-5" />
-          </svg>
-        </button>
-        <button
-          onClick={handleExitFullscreen}
-          className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white transition-colors lg:hidden"
-          title="Exit fullscreen"
-          aria-label="Exit fullscreen"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5" />
-          </svg>
-        </button>
+        {!isFullscreen && (
+          <button
+            onClick={handleFullscreen}
+            className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white transition-colors"
+            title="Fullscreen"
+            aria-label="Fullscreen"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M3 8V3h5M21 8V3h-5M3 16v5h5M21 16v5h-5" />
+            </svg>
+          </button>
+        )}
+        {isFullscreen && (
+          <button
+            onClick={handleExitFullscreen}
+            className="p-1.5 bg-black/60 hover:bg-black/80 rounded text-white transition-colors"
+            title="Exit fullscreen"
+            aria-label="Exit fullscreen"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );
