@@ -248,7 +248,7 @@ export class MultiPeerFileTransferService {
       }
 
       if (transfer.perPeerPaused.has(peerId)) {
-        multiPeerWebRTCService.onBufferedAmountLow(() => {
+        multiPeerWebRTCService.onBufferedAmountLow(peerId, () => {
           transfer.perPeerPaused.delete(peerId);
           sendNextChunk();
         });
@@ -310,7 +310,7 @@ export class MultiPeerFileTransferService {
       const BUFFER_HIGH_WATER = 64 * 1024;
       if (multiPeerWebRTCService.getBufferedAmount(peerId) > BUFFER_HIGH_WATER) {
         transfer.perPeerPaused.add(peerId);
-        multiPeerWebRTCService.onBufferedAmountLow(() => {
+        multiPeerWebRTCService.onBufferedAmountLow(peerId, () => {
           transfer.perPeerPaused.delete(peerId);
           sendNextChunk();
         });

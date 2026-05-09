@@ -31,22 +31,25 @@ class CameraService {
   // Per-peer remote video tracks. The page renders these via <video>
   // elements bound through getRemoteStream(peerId).
   private remoteStreamsByPeer: Map<string, MediaStream> = new Map();
+  // Subscribers notified when a remote stream is added or removed.
+  // RemoteVideos uses this to bind <video>.srcObject independently of
+  // React render timing.
+  private streamSubscribers: Set<(peerId: string) => void> = new Set();
   private active = false;
 
   constructor() {
     multiPeerWebRTCService.on('onTrack', (peerId, stream, kind) => {
       if (kind !== 'video') return;
       this.remoteStreamsByPeer.set(peerId, stream);
-      // The store doesn't hold the MediaStream directly (not serializable);
-      // we just flip a flag so the UI re-renders to call getRemoteStream.
-      useAppStore.getState().updatePeer(peerId, {
-        voiceState: {
-          ...(useAppStore.getState().peers.get(peerId)?.voiceState ?? { sharing: false, muted: false }),
-        },
-      });
+      // Notify subscribers that a new stream is available for this peer.
+      // RemoteVideos uses this to re-bind its <video> element rather than
+      // relying on a re-render driven by cameraState (which can arrive on
+      // the data channel before ontrack fires, leading to a stuck black tile).
+      for (const cb of this.streamSubscribers) cb(peerId);
     });
     multiPeerWebRTCService.on('onPeerDisconnected', (peerId) => {
       this.remoteStreamsByPeer.delete(peerId);
+      for (const cb of this.streamSubscribers) cb(peerId);
     });
     multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
       if (typeof data !== 'string') return;
@@ -61,6 +64,18 @@ class CameraService {
         // not for us
       }
     });
+  }
+
+  /**
+   * Subscribe to remote-stream changes (added or removed). Fired with the
+   * peer ID whenever a track arrives or that peer disconnects. Returns
+   * an unsubscribe function.
+   */
+  onRemoteStreamChanged(cb: (peerId: string) => void): () => void {
+    this.streamSubscribers.add(cb);
+    return () => {
+      this.streamSubscribers.delete(cb);
+    };
   }
 
   on<K extends keyof CameraEvents>(event: K, handler: CameraEvents[K]): void {

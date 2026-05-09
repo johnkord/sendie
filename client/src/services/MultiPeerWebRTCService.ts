@@ -707,14 +707,21 @@ export class MultiPeerWebRTCService {
   }
 
   /**
-   * Set callback for when any peer's buffer becomes low
+   * Register a one-shot callback that fires when the given peer's data
+   * channel reaches its bufferedAmountLow threshold. Replaces any prior
+   * one-shot callback for the same peer (the caller is responsible for
+   * pairing each pause with exactly one onBufferedAmountLow registration,
+   * which is the natural shape for chunked-send loops).
+   *
+   * Per-peer rather than global: an earlier global form set the same
+   * callback on every data channel, which meant concurrent sends to two
+   * peers would clobber each other's wakeups and one peer would freeze
+   * forever.
    */
-  onBufferedAmountLow(callback: () => void): void {
-    for (const peerInfo of this.peerConnections.values()) {
-      if (peerInfo.dataChannel) {
-        peerInfo.dataChannel.onbufferedamountlow = callback;
-      }
-    }
+  onBufferedAmountLow(peerId: string, callback: () => void): void {
+    const info = this.peerConnections.get(peerId);
+    if (!info?.dataChannel) return;
+    info.dataChannel.onbufferedamountlow = callback;
   }
 
   /**

@@ -40,18 +40,32 @@ function RemoteVideoTile({
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
 
+  // Subscribe to camera service stream changes. The data-channel
+  // 'camera-state' message can arrive before WebRTC's ontrack event,
+  // so we cannot rely on React re-rendering with a fresh stream;
+  // we re-bind on every notification for this peer.
   useEffect(() => {
-    if (!ref.current) return;
-    const stream = cameraService.getRemoteStream(peerId);
-    ref.current.srcObject = stream ?? null;
-    if (stream) {
-      // Explicit play() in case autoplay was blocked despite the local
-      // user gesture (e.g. cross-tab scenarios).
-      ref.current.play().catch(() => {
-        // Browser will retry on next interaction; nothing to do here.
-      });
-    }
-  }, [peerId, peer.cameraState?.sharing]);
+    const bind = () => {
+      const el = ref.current;
+      if (!el) return;
+      const stream = cameraService.getRemoteStream(peerId);
+      if (el.srcObject !== stream) {
+        el.srcObject = stream ?? null;
+      }
+      if (stream) {
+        el.play().catch(() => {
+          // Browser will retry on next interaction; nothing to do here.
+        });
+      }
+    };
+    // Bind once on mount in case the stream is already there.
+    bind();
+    // Subscribe to future updates for THIS peer.
+    const unsub = cameraService.onRemoteStreamChanged((changedPeerId) => {
+      if (changedPeerId === peerId) bind();
+    });
+    return unsub;
+  }, [peerId]);
 
   const label =
     peer.friendlyName ?? `Peer ${peerId.substring(0, 8)}`;
