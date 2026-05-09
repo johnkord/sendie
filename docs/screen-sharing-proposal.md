@@ -196,6 +196,151 @@ slow receiver gets fewer temporal layers. In a mesh this requires
 manual per-peer layer selection and is fiddly. Worth it for production
 SFU work, overkill for Sendie. Skip.
 
+## 4a. Alternatives to RTP that the room deserves to hear
+
+The N-encoder problem and Sendie's overall "the server sees nothing"
+posture make a few non-WebRTC paths worth a serious look. None are
+the v1 answer; one or two could be the v2 or v3 answer.
+
+### 4a.1 WebCodecs + RTCDataChannel: skip RTP entirely
+
+RTP is a 30-year-old protocol with mature jitter buffering, NACK,
+PLI, and congestion control built into the browser's media stack. We
+get all of that for free with `addTrack`. But we also pay for it: an
+encoder per peer, a packetization layer per peer, and an RTP layer
+that assumes one logical stream per receiver.
+
+A different shape, now possible because WebCodecs is Baseline
+everywhere except old Safari:
+
+```
+  getDisplayMedia                              
+        |                                      
+        v                                      
+  MediaStreamTrackProcessor (worker)           
+        |                                      
+        v                                      
+  VideoEncoder (one instance, in worker)       
+        |                                      
+        v                                      
+  EncodedVideoChunk (per frame)                
+        |                                      
+        v                                      
+  framing + per-peer E2EE wrap (worker)        
+        |                                      
+        v                                      
+  for each peer: pc.dataChannel.send(bytes)    
+```
+
+Receivers reverse: data-channel `onmessage` -> unwrap -> `VideoDecoder`
+-> `VideoFrame` -> draw to `<canvas>` or via `MediaStreamTrackGenerator`.
+
+What we win:
+
+- One encode, N sends. Same CPU savings as the encoded-fanout pattern
+  in section 4.2, but without the `RTCRtpScriptTransform` plumbing.
+- E2EE is trivial: the bytes we already control are the ones we
+  encrypt before `dataChannel.send()`. No need to leave an unencrypted
+  prefix for the packetizer.
+- Per-peer flow control is the same SCTP back-pressure model we
+  already use for files. We have all that code and it works.
+- Sender-side priority knobs (dropping P-frames first under stress)
+  are exposed directly because the encoded chunks are JS-visible.
+
+What we lose, and have to re-implement:
+
+- Jitter buffer. Frames will arrive out of order or late; we have to
+  decide when to drop vs wait. Not hard for screen content (low
+  motion, mostly key-frame-aligned), genuinely hard for live camera.
+- Loss recovery. Data channels are reliable+ordered by default in
+  Sendie; we'd want to switch the share channel to unreliable
+  (`maxRetransmits: 0` with `ordered: false`) and add our own forward
+  error correction or key-frame-on-loss request protocol.
+- Congestion control. SCTP has its own, but it is tuned for files and
+  generic data, not live media. We'd need to back off bitrate via
+  `VideoEncoder.configure({ bitrate })` based on observed RTT and
+  data-channel bufferedAmount growth. Doable, not free.
+- Browser jitter compensation, audio sync, A/V sync if we add audio.
+  None of those matter for screen + voice in our model where voice
+  goes over the existing voice path.
+
+Verdict: this is a genuine architectural alternative that fits Sendie
+better than RTP for screen content specifically. Screen sharing is
+low-motion, high-detail, mostly idempotent at the frame level, and
+often paired with a separate voice path. Camera and voice should
+stay on RTP because the jitter-buffer and A/V-sync work the browser
+does is genuine value for those payloads. **Recommended as v3 once
+v1 (boring `addTrack`) and v2 (encoded fanout) have shipped and we
+have real telemetry.**
+
+### 4a.2 DOM sync / co-browsing instead of pixel streaming
+
+The most creative alternative is to not stream pixels at all.
+
+For code review, slide presentations, or any web-app demo, a
+fundamentally cheaper approach is to serialize the DOM (and CSS, and
+render-relevant state) and reconstruct it on the receiver side. The
+bandwidth savings are dramatic: a 1080p tab at 30 fps is 1.5 Mbit/s
+of video, but the same tab as compressed DOM diffs is typically a few
+dozen KiB/s, with text remaining infinitely crisp at any zoom level.
+
+For a peer-to-peer tool with code-review as a flagship use case, this
+is arguably the right answer for that one workflow:
+
+- Sharer captures a target subtree (Element Capture's `RestrictionTarget`
+  conceptually maps cleanly onto "this is the captured DOM root").
+- Periodic MutationObserver-driven diffs serialized to JSON-Patch or
+  an equivalent structural diff format.
+- Receiver reconstructs into a sandboxed iframe with `srcdoc` and
+  applies diffs.
+- Click and scroll positions piggyback on the existing data channel.
+
+What it can't do: capture a non-Sendie tab, capture a window, or
+capture the entire screen. Same-origin only, by browser security
+design. So this is not a replacement for screen sharing; it is a
+**complement** for the case "share what's in this Sendie panel". One
+concrete v3+ feature: Sendie hosts an in-app whiteboard / code editor
+/ markdown preview, and DOM-syncs that subtree to peers. Pixel
+sharing (section 2 to 5) covers everything else.
+
+### 4a.3 WebTransport + relay (rejected, but worth naming)
+
+WebTransport is now Baseline 2026, with HTTP/3 datagrams and
+QUIC streams. With a server-side relay, MoQ Transport (IETF draft 17,
+March 2026) gives publish/subscribe semantics that map naturally onto
+screen-sharing fanout: the publisher uploads one encoded copy, the
+relay distributes.
+
+This is the architecture every commercial video product is moving
+to. It is **incompatible with Sendie's mesh / P2P promise**: it
+requires running a relay, that relay sees the bytes (unless we layer
+E2EE on top, which is what the MoQ spec encourages but does not
+standardize), and it converts Sendie from "two browsers and a
+signaling server" into "two browsers and a media server".
+
+We should not adopt this. We should mention it in the doc so the
+decision to stay mesh is explicit and revisitable.
+
+### 4a.4 Crop before encode (creative win, low cost)
+
+A detail that pays off across all approaches: shrink the captured
+frame before encoding. The user often wants "this window" but ends
+up sharing the whole screen because the window picker is fiddly.
+With a `MediaStreamTrackProcessor` in a worker we can downscale or
+crop frames to the target window's bounds before they hit the
+encoder. Two consequences:
+
+- Bitrate savings of 4x to 10x for typical "share just this terminal
+  window" use cases.
+- Privacy: notification toasts, system tray, and other surfaces
+  outside the target rectangle are dropped before any peer sees a
+  byte.
+
+This composes with section 4a.1 (the encode is in a worker already)
+or with the boring `addTrack` path if we do it via the `processor`
+=> `generator` => `addTrack(generator.track)` chain. Cheap. Ship
+in v1 if the API surface allows.
+
 ## 5. End-to-end frame encryption
 
 Sendie's brand commitment is "the server sees nothing". The signaling
@@ -330,6 +475,19 @@ The honest order of operations:
   share VP9 reliably; AV1 requires both to negotiate it. Picking a
   codec at the SDP layer per-peer means receivers may see different
   quality. Acceptable.
+- **RTP vs WebCodecs+DataChannel.** RTP is the boring, correct
+  default and what v1 ships. The WebCodecs+DataChannel path (4a.1)
+  is architecturally cleaner for screen content and lets us drop a
+  whole codec-agnostic plumbing layer, but commits us to writing
+  jitter buffer and FEC code. Right answer is to ship RTP, measure
+  pain points, and only switch the screen-share-specific path if
+  encoded-fanout via insertable streams turns out to be insufficient.
+- **Pixel sharing vs DOM sync.** Pixel sharing is universal but
+  expensive. DOM sync (4a.2) is order-of-magnitude cheaper for the
+  one use case where it applies (in-app subtrees). Don't conflate
+  them; they solve different problems. Build pixel sharing first;
+  add DOM sync as an in-Sendie feature for whiteboard/editor when
+  those exist.
 - **Encoded-fanout vs simplicity.** The naive N-encoders approach
   ships in days; the encoded-fanout approach is the right architecture
   but cuts in months. Build (1) first, demonstrate the pain at 8
@@ -342,6 +500,10 @@ The honest order of operations:
   drive scroll on your tab is genuinely powerful but also genuinely
   scary. UI must make per-peer consent explicit and revocable; do
   not hide it behind a single global toggle.
+- **Mesh vs relay.** WebTransport+MoQ (4a.3) is the industry direction
+  but breaks Sendie's "server sees nothing" promise. The decision to
+  stay mesh is intentional; document it so we can revisit if and
+  when group sizes outgrow what mesh can carry.
 - **iOS sender remains impossible until Apple ships
   `getDisplayMedia`.** No sign of it; this is a known platform gap,
   not a Sendie defect. Communicate it once, in the disabled-button
