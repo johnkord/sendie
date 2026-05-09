@@ -8,6 +8,15 @@ import type { TransferState, DataChannelMessage, FileStartMessage } from '../typ
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 const STREAMING_THRESHOLD = 100 * 1024 * 1024; // 100MB - files larger than this stream to disk
 
+// ACK-based flow control. Sender pauses when it is more than
+// FLOW_CONTROL_WINDOW chunks ahead of the latest ACK from this receiver.
+// Receiver sends a fresh ACK every PROGRESS_ACK_INTERVAL committed chunks.
+// At 64KB chunks, window=512 means the sender can be ~32MB ahead, which
+// is enough to keep the pipe full but small enough to bound memory and
+// stop a fast sender from outrunning a slow disk.
+const PROGRESS_ACK_INTERVAL = 32;
+const FLOW_CONTROL_WINDOW = 512;
+
 // Check if File System Access API is supported (Chrome/Edge)
 const supportsFileSystemAccess = 'showSaveFilePicker' in window;
 
@@ -56,6 +65,14 @@ interface BroadcastTransfer {
   // Per-peer flow-control pause flag. The shared sendPaused was wrong
   // because one slow peer would block sends to every other peer.
   perPeerPaused: Set<string>;
+  // ACK-based flow control: how many chunks we have sent to each peer,
+  // and the latest ACK we have received from them. If sent - ack >
+  // FLOW_CONTROL_WINDOW, the per-peer loop pauses until a fresh ACK arrives.
+  perPeerChunksSent: Map<string, number>;
+  perPeerAckedChunks: Map<string, number>;
+  // Resolvers waiting for a fresh ACK on a given peer (so the per-peer
+  // loop can await a new ACK before resuming).
+  perPeerAckWaiters: Map<string, () => void>;
   // Set by cancelTransfer; the per-peer send loop checks this each
   // iteration and exits early so we don't keep blasting chunks at a
   // peer after the user pressed cancel.
@@ -84,6 +101,12 @@ interface IncomingTransfer {
   // concurrent writes). This also makes bytesTransferred reflect actual
   // committed bytes, not just received bytes, so the UI is honest.
   writeQueueTail: Promise<void>;
+  // Number of chunks we have actually committed. Sent back to the sender
+  // as a periodic file-progress ACK so they can throttle.
+  chunksWritten: number;
+  // Last value of chunksWritten we ACKed back to the sender. We send
+  // a fresh ACK every PROGRESS_ACK_INTERVAL committed chunks.
+  lastAckedChunks: number;
 }
 
 /**
@@ -184,6 +207,9 @@ export class MultiPeerFileTransferService {
         completedPeers: new Set(),
         perPeerBytes: new Map(),
         perPeerPaused: new Set(),
+        perPeerChunksSent: new Map(),
+        perPeerAckedChunks: new Map(),
+        perPeerAckWaiters: new Map(),
         cancelled: false,
         resolve,
         reject,
@@ -261,6 +287,25 @@ export class MultiPeerFileTransferService {
         return;
       }
 
+      // ACK-based flow control. RTCDataChannel.bufferedAmount only sees the
+      // local SCTP queue; with a fast LAN to a slow disk, the receiver's
+      // OS / browser queue can grow without bound while our bufferedAmount
+      // stays small. Without this gate, a large file would let the sender
+      // run thousands of chunks ahead of the receiver's commit cursor and
+      // (depending on the streaming target) eventually error or hang.
+      const sent = transfer.perPeerChunksSent.get(peerId) ?? 0;
+      const acked = transfer.perPeerAckedChunks.get(peerId) ?? 0;
+      if (sent - acked >= FLOW_CONTROL_WINDOW) {
+        await new Promise<void>((resolve) => {
+          transfer.perPeerAckWaiters.set(peerId, resolve);
+        });
+        // Re-check cancellation/closure after waking; nothing else changed.
+        if (transfer.cancelled) {
+          finishPeer(true);
+          return;
+        }
+      }
+
       // Read more data if needed
       while (buffer.length < CHUNK_SIZE) {
         const { done, value } = await reader.read();
@@ -305,6 +350,7 @@ export class MultiPeerFileTransferService {
       // Update per-peer counter and aggregate progress.
       peerBytes += chunk.length;
       transfer.perPeerBytes.set(peerId, peerBytes);
+      transfer.perPeerChunksSent.set(peerId, chunkIndex + 1);
       this.recomputeAggregateProgress(transfer);
 
       chunkIndex++;
@@ -432,6 +478,9 @@ export class MultiPeerFileTransferService {
         completedPeers: new Set(),
         perPeerBytes: new Map(),
         perPeerPaused: new Set(),
+        perPeerChunksSent: new Map(),
+        perPeerAckedChunks: new Map(),
+        perPeerAckWaiters: new Map(),
         cancelled: false,
         resolve,
         reject,
@@ -525,6 +574,24 @@ export class MultiPeerFileTransferService {
         const incoming = this.incomingTransfers.get(key);
         if (incoming) {
           this.completeIncomingTransfer(incoming);
+        }
+        break;
+      }
+
+      case 'file-progress': {
+        // Receiver tells us how many chunks they have committed. We use
+        // this to bound how far ahead the sender can run.
+        const transfer = this.broadcastTransfers.get(message.fileId);
+        if (!transfer) break;
+        const prev = transfer.perPeerAckedChunks.get(peerId) ?? 0;
+        if (message.chunksWritten > prev) {
+          transfer.perPeerAckedChunks.set(peerId, message.chunksWritten);
+          // Wake the per-peer loop if it was waiting for an ACK.
+          const waiter = transfer.perPeerAckWaiters.get(peerId);
+          if (waiter) {
+            transfer.perPeerAckWaiters.delete(peerId);
+            waiter();
+          }
         }
         break;
       }
@@ -636,6 +703,8 @@ export class MultiPeerFileTransferService {
       streamingMethod: 'none',
       state,
       writeQueueTail: Promise.resolve(),
+      chunksWritten: 0,
+      lastAckedChunks: 0,
     };
 
     // For large files, try to set up streaming to disk.
@@ -753,11 +822,27 @@ export class MultiPeerFileTransferService {
           incoming.receivedChunks.push(data);
         }
         incoming.state.bytesTransferred += data.byteLength;
+        incoming.chunksWritten += 1;
         const elapsed = (Date.now() - incoming.state.startTime!) / 1000;
         incoming.state.speed = elapsed > 0
           ? incoming.state.bytesTransferred / elapsed
           : 0;
         this.events.onTransferProgress?.(incoming.state);
+        // Periodic ACK back to the sender so they can throttle. Sent
+        // every PROGRESS_ACK_INTERVAL committed chunks. The sender uses
+        // this to enforce a sliding window and not run miles ahead of
+        // the receiver's commit cursor.
+        if (incoming.chunksWritten - incoming.lastAckedChunks >= PROGRESS_ACK_INTERVAL) {
+          incoming.lastAckedChunks = incoming.chunksWritten;
+          multiPeerWebRTCService.sendTo(
+            incoming.peerId,
+            JSON.stringify({
+              type: 'file-progress',
+              fileId: incoming.fileId,
+              chunksWritten: incoming.chunksWritten,
+            }),
+          );
+        }
       } catch (err) {
         console.error(`Error writing chunk from ${peerId} to disk:`, err);
         incoming.state.status = 'error';
@@ -844,8 +929,11 @@ export class MultiPeerFileTransferService {
     const broadcast = this.broadcastTransfers.get(fileId);
     if (broadcast) {
       // Mark cancelled first so any in-flight sendNextChunk loops exit on
-      // their next iteration. Then notify peers and emit the UI event.
+      // their next iteration. Wake any per-peer loops that are blocked
+      // waiting for an ACK so they observe the cancellation flag.
       broadcast.cancelled = true;
+      for (const [, waiter] of broadcast.perPeerAckWaiters) waiter();
+      broadcast.perPeerAckWaiters.clear();
       broadcast.state.status = 'cancelled';
       this.events.onTransferError?.(fileId, new Error('Transfer cancelled'));
       this.broadcastTransfers.delete(fileId);
@@ -888,6 +976,15 @@ export class MultiPeerFileTransferService {
    */
   handlePeerDisconnected(peerId: string): void {
     for (const transfer of this.broadcastTransfers.values()) {
+      // Wake the per-peer ACK waiter (if any) so the loop notices the
+      // disconnect rather than blocking forever for an ACK from a peer
+      // that's gone.
+      const waiter = transfer.perPeerAckWaiters.get(peerId);
+      if (waiter) {
+        transfer.perPeerAckWaiters.delete(peerId);
+        waiter();
+      }
+
       const wasReceiving = transfer.acceptedPeers.has(peerId)
         && !transfer.completedPeers.has(peerId);
       const wasUnresolved = transfer.targetPeers.includes(peerId)

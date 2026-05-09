@@ -90,6 +90,12 @@ export type DataChannelMessage =
   | FileStartMessage
   | { type: 'file-chunk'; fileId: string; chunkIndex: number }
   | { type: 'file-end'; fileId: string }
+  // Receiver-to-sender ACK. Periodic (every N chunks). Sender uses this
+  // to throttle: if it is more than M chunks ahead of the latest ACK,
+  // pause until a fresh ACK arrives. Closes the gap left by RTCDataChannel
+  // bufferedAmount, which only reflects local SCTP queue, not the
+  // receiver's downstream backlog.
+  | { type: 'file-progress'; fileId: string; chunksWritten: number }
   | { type: 'file-ack'; fileId: string; chunkIndex: number }
   | { type: 'file-accept'; fileId: string }
   | { type: 'file-decline'; fileId: string }
