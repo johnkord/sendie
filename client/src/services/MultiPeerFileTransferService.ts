@@ -20,8 +20,48 @@ const FLOW_CONTROL_WINDOW = 512;
 // Check if File System Access API is supported (Chrome/Edge)
 const supportsFileSystemAccess = 'showSaveFilePicker' in window;
 
-// StreamSaver.js works in all modern browsers as fallback
+// Origin Private File System: navigator.storage.getDirectory() exists in
+// Firefox 111+, Chrome 86+, Safari 15.2+. We use it as the preferred
+// fallback when showSaveFilePicker is not available, because it does NOT
+// require a service worker (unlike StreamSaver) and works for arbitrarily
+// large files. After the transfer completes, we deliver the file via
+// <a download> from a Blob backed by the OPFS handle.
+//
+// We also require FileSystemFileHandle.prototype.createWritable, because
+// older Firefox shipped getDirectory() before createWritable() and we'd
+// otherwise fall through to StreamSaver after a partial setup.
+const supportsOPFS = typeof navigator !== 'undefined'
+  && typeof navigator.storage?.getDirectory === 'function'
+  && typeof (globalThis as { FileSystemFileHandle?: { prototype?: { createWritable?: unknown } } })
+    .FileSystemFileHandle?.prototype?.createWritable === 'function';
+
+// Hard cap for the StreamSaver fallback path. Empirically this fails on
+// Firefox somewhere in the few-hundred-MB range when its service worker
+// is killed mid-stream; we have observed reproducible stalls around
+// 370MB on multi-GB transfers. Rather than start a transfer that is
+// statistically going to wedge, refuse upfront with an actionable error.
+//
+// Firefox is much more aggressive about killing SWs than Chromium
+// (cf. StreamSaver issue #366, "firefox service worker stopped and
+// partial download"). The maintainer of StreamSaver acknowledges this
+// is not fixable from library code, so we hard-cap Firefox lower.
+const isFirefox = typeof navigator !== 'undefined'
+  && /firefox/i.test(navigator.userAgent ?? '');
+const STREAMSAVER_MAX_RELIABLE_BYTES = isFirefox
+  ? 256 * 1024 * 1024     // 256 MiB on Firefox; observed stalls at ~370MB.
+  : 1 * 1024 * 1024 * 1024; // 1 GiB elsewhere.
+
+// StreamSaver is the last-resort fallback. It pipes through a service
+// worker, which Firefox kills aggressively under memory pressure or for
+// long-running streams. Empirically reliable to a few hundred MB on
+// Firefox; multi-GB transfers stall when the SW is killed mid-stream.
 const supportsStreamSaver = typeof WritableStream !== 'undefined';
+
+// If a streaming transfer makes no committed-bytes progress for this long,
+// the watchdog tears it down with a clear error. Catches the
+// 'StreamSaver SW was killed and writes hang forever' failure mode
+// without forcing the user to wait indefinitely.
+const WRITE_STALL_TIMEOUT_MS = 30_000;
 
 export type MultiPeerFileTransferEvents = {
   onTransferStart: (transfer: TransferState) => void;
@@ -92,8 +132,15 @@ interface IncomingTransfer {
   fileHandle: FileSystemFileHandle | null;
   writable: FileSystemWritableFileStream | null;
   streamSaverWriter: WritableStreamDefaultWriter<Uint8Array> | null;
+  // OPFS bookkeeping. opfsHandle is the FileSystemFileHandle inside the
+  // origin-private filesystem; opfsName is the unique name we used so we
+  // can remove it after delivery. opfsWritable is the backing writable
+  // during transfer.
+  opfsHandle: FileSystemFileHandle | null;
+  opfsWritable: FileSystemWritableFileStream | null;
+  opfsName: string | null;
   useStreaming: boolean;
-  streamingMethod: 'none' | 'file-system-access' | 'stream-saver';
+  streamingMethod: 'none' | 'file-system-access' | 'stream-saver' | 'opfs';
   state: TransferState;
   // Tail of the write-queue promise chain. handleChunkData links new
   // writes onto this so they execute in arrival order against the
@@ -107,6 +154,12 @@ interface IncomingTransfer {
   // Last value of chunksWritten we ACKed back to the sender. We send
   // a fresh ACK every PROGRESS_ACK_INTERVAL committed chunks.
   lastAckedChunks: number;
+  // Watchdog: if commits stall for too long while the channel is open,
+  // tear down with a clear error rather than hanging forever. Especially
+  // important for the StreamSaver path on Firefox, which can wedge when
+  // its service worker is killed mid-stream.
+  lastProgressAt: number;
+  watchdogTimer: ReturnType<typeof setInterval> | null;
 }
 
 /**
@@ -597,18 +650,52 @@ export class MultiPeerFileTransferService {
       }
 
       case 'transfer-cancel': {
+        // Symmetric: either side can send this. Receiver-side abort
+        // (e.g. watchdog tripped on a StreamSaver stall) sends this so
+        // the sender doesn't sit forever waiting for ACKs that will
+        // never come.
         const key = `${peerId}:${message.fileId}`;
         const incoming = this.incomingTransfers.get(key);
         if (incoming) {
           incoming.state.status = 'cancelled';
+          if (incoming.watchdogTimer) {
+            clearInterval(incoming.watchdogTimer);
+            incoming.watchdogTimer = null;
+          }
           if (incoming.writable) {
             incoming.writable.abort().catch(() => {});
+          }
+          if (incoming.opfsWritable) {
+            incoming.opfsWritable.abort().catch(() => {});
           }
           if (incoming.streamSaverWriter) {
             incoming.streamSaverWriter.abort().catch(() => {});
           }
           this.events.onTransferError?.(message.fileId, new Error('Transfer cancelled by sender'));
           this.incomingTransfers.delete(key);
+        }
+
+        // Sender-side: if a receiver aborted, treat that peer as having
+        // declined/finished so the broadcast can move on instead of
+        // hanging on flow-control window forever.
+        const broadcast = this.broadcastTransfers.get(message.fileId);
+        if (broadcast) {
+          const waiter = broadcast.perPeerAckWaiters.get(peerId);
+          if (waiter) {
+            broadcast.perPeerAckWaiters.delete(peerId);
+            waiter();
+          }
+          if (broadcast.acceptedPeers.has(peerId)) {
+            broadcast.completedPeers.add(peerId);
+          } else {
+            broadcast.declinedPeers.add(peerId);
+            this.events.onFileDeclined?.(peerId, message.fileId);
+          }
+          this.events.onTransferError?.(
+            message.fileId,
+            new Error(`Receiver ${peerId} aborted the transfer (likely a streaming stall on their browser).`),
+          );
+          this.checkTransferComplete(broadcast, true);
         }
         break;
       }
@@ -699,18 +786,30 @@ export class MultiPeerFileTransferService {
       fileHandle: null,
       writable: null,
       streamSaverWriter: null,
+      opfsHandle: null,
+      opfsWritable: null,
+      opfsName: null,
       useStreaming: false,
       streamingMethod: 'none',
       state,
       writeQueueTail: Promise.resolve(),
       chunksWritten: 0,
       lastAckedChunks: 0,
+      lastProgressAt: Date.now(),
+      watchdogTimer: null,
     };
 
-    // For large files, try to set up streaming to disk.
-    // For small files we will go through showSaveFilePicker on completion
-    // (when supported); fall back to <a download> after the user already
-    // explicitly accepted, so this is not a drive-by.
+    // Streaming setup. Order of preference:
+    //   1. showSaveFilePicker (Chrome/Edge): user picks a file, we stream
+    //      directly to disk. Most reliable.
+    //   2. OPFS (Firefox 111+, Safari 15.2+): write into the origin private
+    //      filesystem, then deliver as a Blob via <a download> on
+    //      completion. No service worker. No size dialog. Reliable for
+    //      multi-GB files where StreamSaver fails.
+    //   3. StreamSaver: pipes through a service worker. Empirically fails
+    //      on Firefox at ~hundreds of MB when the SW is killed mid-stream.
+    //      Last resort.
+    //   4. In-memory: refused over IN_MEMORY_LIMIT to avoid OOM.
     if (isLargeFile) {
       if (supportsFileSystemAccess) {
         try {
@@ -727,11 +826,101 @@ export class MultiPeerFileTransferService {
           incoming.streamingMethod = 'file-system-access';
           console.log(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) - streaming via File System Access API`);
         } catch (err) {
-          console.log('File System Access cancelled, trying StreamSaver.js fallback');
+          console.log('File System Access cancelled, trying OPFS fallback:', err);
         }
       }
-      
+
+      if (!incoming.useStreaming && supportsOPFS) {
+        // Always request persistent storage before opening an OPFS
+        // writable for a large file. On Firefox in particular this is
+        // the difference between "5GB write completes" and "write throws
+        // QuotaExceededError around N hundred MB". `persist()` returns
+        // false (or `null` in some implementations) when the user
+        // declines, but Firefox auto-grants for sites the user has
+        // installed/bookmarked, and otherwise will prompt. We try and
+        // continue regardless; if quota actually runs out the write
+        // will throw and the watchdog/abortIncoming will surface a
+        // clean error.
+        //
+        // We deliberately do NOT call estimate() and gate on it: the
+        // reported quota lags reality on Firefox (it's a soft, evictable
+        // tier until persist is granted) and we'd skip OPFS for files
+        // that would actually fit. Better to try and let the OS say no.
+        try {
+          if (typeof navigator.storage?.persist === 'function'
+            && typeof navigator.storage?.persisted === 'function') {
+            const already = await navigator.storage.persisted();
+            if (!already) {
+              const granted = await navigator.storage.persist();
+              console.log(`OPFS persistent storage ${granted ? 'granted' : 'denied'} (continuing either way)`);
+            }
+          }
+        } catch (err) {
+          console.log('persist() request failed; continuing:', err);
+        }
+
+        try {
+          const root = await navigator.storage.getDirectory();
+          // Use a unique name so concurrent transfers do not collide.
+          const opfsName = `sendie-${message.fileId}-${safeFileName}`;
+          const handle = await root.getFileHandle(opfsName, { create: true });
+          const writable = await handle.createWritable();
+          incoming.opfsHandle = handle;
+          incoming.opfsWritable = writable;
+          incoming.opfsName = opfsName;
+          incoming.useStreaming = true;
+          incoming.streamingMethod = 'opfs';
+          console.log(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) - streaming via OPFS`);
+        } catch (err) {
+          console.log('OPFS streaming failed, trying StreamSaver fallback:', err);
+        }
+      }
+
+      // Firefox + StreamSaver = silent stall (StreamSaver issue #366).
+      // If we got here on Firefox, OPFS already failed; falling further
+      // to StreamSaver is worse than refusing with a clear message.
+      if (!incoming.useStreaming && isFirefox) {
+        console.warn('Refusing to use StreamSaver on Firefox; SW lifecycle makes it unreliable.');
+        multiPeerWebRTCService.sendTo(
+          peerId,
+          JSON.stringify({ type: 'file-decline', fileId: message.fileId }),
+        );
+        this.events.onTransferError?.(
+          message.fileId,
+          new Error(
+            `Could not open a reliable streaming target on Firefox. ` +
+            `OPFS (Origin Private File System) is required for large transfers, ` +
+            `but it is unavailable here (likely Private Browsing, an old Firefox version, ` +
+            `or storage permission was denied). ` +
+            `Try a normal (non-private) Firefox 111+ window, or use Chrome/Edge.`,
+          ),
+        );
+        return;
+      }
+
       if (!incoming.useStreaming && supportsStreamSaver) {
+        if (message.fileSize > STREAMSAVER_MAX_RELIABLE_BYTES) {
+          // Refuse rather than start something that will stall. Surfaces
+          // a real error to the user instead of an indefinite hang.
+          console.warn(
+            `Refusing ${(message.fileSize / 1024 / 1024 / 1024).toFixed(2)}GB file via StreamSaver: ` +
+            `above the ${(STREAMSAVER_MAX_RELIABLE_BYTES / 1024 / 1024 / 1024).toFixed(0)}GB reliable cap on this browser.`,
+          );
+          multiPeerWebRTCService.sendTo(
+            peerId,
+            JSON.stringify({ type: 'file-decline', fileId: message.fileId }),
+          );
+          this.events.onTransferError?.(
+            message.fileId,
+            new Error(
+              `File is ${(message.fileSize / 1024 / 1024 / 1024).toFixed(2)}GB. ` +
+              `Your browser only supports the StreamSaver fallback, which is unreliable above ~1GB. ` +
+              `Use Chrome or Edge (which support direct-to-disk streaming via showSaveFilePicker) for files this large, ` +
+              `or update Firefox to 111 or newer for OPFS support.`,
+            ),
+          );
+          return;
+        }
         try {
           const fileStream = streamSaver.createWriteStream(safeFileName, {
             size: message.fileSize,
@@ -739,16 +928,49 @@ export class MultiPeerFileTransferService {
           incoming.streamSaverWriter = fileStream.getWriter();
           incoming.useStreaming = true;
           incoming.streamingMethod = 'stream-saver';
-          console.log(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) - streaming via StreamSaver.js`);
+          console.log(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) - streaming via StreamSaver.js (may stall on multi-GB)`);
         } catch (err) {
-          console.log('StreamSaver.js failed, falling back to in-memory:', err);
+          console.log('StreamSaver.js failed:', err);
         }
       }
 
+      // In-memory cap: 512MB. Above this we refuse rather than OOM the tab.
+      const IN_MEMORY_LIMIT = 512 * 1024 * 1024;
+      if (!incoming.useStreaming && message.fileSize > IN_MEMORY_LIMIT) {
+        console.warn(`File too large for in-memory fallback; declining`);
+        multiPeerWebRTCService.sendTo(
+          peerId,
+          JSON.stringify({ type: 'file-decline', fileId: message.fileId }),
+        );
+        this.events.onTransferError?.(
+          message.fileId,
+          new Error(
+            `File is ${(message.fileSize / 1024 / 1024 / 1024).toFixed(1)}GB and your browser does not support a streaming download method. Try Chrome/Edge for files this large.`,
+          ),
+        );
+        return;
+      }
       if (!incoming.useStreaming) {
         console.warn(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) will be held in memory - may cause issues`);
       }
     }
+
+    // Watchdog: poll lastProgressAt; if no committed bytes for too long
+    // while the channel is still open, abort with a clear message.
+    incoming.watchdogTimer = setInterval(() => {
+      if (Date.now() - incoming.lastProgressAt < WRITE_STALL_TIMEOUT_MS) return;
+      if (incoming.state.status === 'completed' || incoming.state.status === 'cancelled') return;
+      console.error(
+        `Transfer ${incoming.fileId} stalled for ${WRITE_STALL_TIMEOUT_MS / 1000}s ` +
+        `via ${incoming.streamingMethod}. Aborting.`,
+      );
+      this.abortIncoming(incoming, new Error(
+        `Transfer stalled. The browser stopped accepting writes. ` +
+        (incoming.streamingMethod === 'stream-saver'
+          ? 'This is a known limitation of the StreamSaver fallback for very large files on Firefox. Try Chrome/Edge for multi-GB transfers.'
+          : 'Disk may be full or write quota exhausted.'),
+      ));
+    }, 5_000);
 
     const key = `${peerId}:${message.fileId}`;
     this.incomingTransfers.set(key, incoming);
@@ -815,6 +1037,8 @@ export class MultiPeerFileTransferService {
         if (incoming.useStreaming) {
           if (incoming.streamingMethod === 'file-system-access' && incoming.writable) {
             await incoming.writable.write(data);
+          } else if (incoming.streamingMethod === 'opfs' && incoming.opfsWritable) {
+            await incoming.opfsWritable.write(data);
           } else if (incoming.streamingMethod === 'stream-saver' && incoming.streamSaverWriter) {
             await incoming.streamSaverWriter.write(new Uint8Array(data));
           }
@@ -823,6 +1047,7 @@ export class MultiPeerFileTransferService {
         }
         incoming.state.bytesTransferred += data.byteLength;
         incoming.chunksWritten += 1;
+        incoming.lastProgressAt = Date.now();
         const elapsed = (Date.now() - incoming.state.startTime!) / 1000;
         incoming.state.speed = elapsed > 0
           ? incoming.state.bytesTransferred / elapsed
@@ -851,8 +1076,66 @@ export class MultiPeerFileTransferService {
     });
   }
 
+  /**
+   * Tear down a stalled or failed incoming transfer. Called by the
+   * watchdog when no committed bytes have landed for too long.
+   *
+   * Steps, in order:
+   *   1. Stop the watchdog so it can't re-fire while we're cleaning up.
+   *   2. Abort whichever writer is in flight so any pending write()
+   *      promises reject promptly. opfsWritable.abort() also discards
+   *      the partial OPFS file.
+   *   3. Remove the OPFS entry by name (best-effort; abort() should
+   *      handle it but be defensive).
+   *   4. Tell the sender to stop. Without this they sit at +window
+   *      ahead of our last ACK forever, which is the original bug.
+   *   5. Surface the error to the UI and drop the transfer.
+   */
+  private abortIncoming(incoming: IncomingTransfer, error: Error): void {
+    const key = `${incoming.peerId}:${incoming.fileId}`;
+    if (!this.incomingTransfers.has(key)) return; // already torn down
+
+    if (incoming.watchdogTimer) {
+      clearInterval(incoming.watchdogTimer);
+      incoming.watchdogTimer = null;
+    }
+
+    if (incoming.writable) incoming.writable.abort().catch(() => {});
+    if (incoming.opfsWritable) incoming.opfsWritable.abort().catch(() => {});
+    if (incoming.streamSaverWriter) incoming.streamSaverWriter.abort().catch(() => {});
+
+    if (incoming.opfsName) {
+      navigator.storage.getDirectory()
+        .then((root) => root.removeEntry(incoming.opfsName!))
+        .catch(() => {});
+    }
+
+    // Best-effort: tell the sender we're done so they don't hang on the
+    // flow-control window waiting for ACKs from a dead writer.
+    if (multiPeerWebRTCService.isDataChannelOpen(incoming.peerId)) {
+      try {
+        multiPeerWebRTCService.sendTo(
+          incoming.peerId,
+          JSON.stringify({ type: 'transfer-cancel', fileId: incoming.fileId }),
+        );
+      } catch {
+        // ignore; channel may have closed underneath us
+      }
+    }
+
+    incoming.state.status = 'error';
+    this.events.onTransferError?.(incoming.fileId, error);
+    this.incomingTransfers.delete(key);
+  }
+
   private async completeIncomingTransfer(incoming: IncomingTransfer): Promise<void> {
     const key = `${incoming.peerId}:${incoming.fileId}`;
+
+    // Stop the stall watchdog: we are entering completion logic.
+    if (incoming.watchdogTimer) {
+      clearInterval(incoming.watchdogTimer);
+      incoming.watchdogTimer = null;
+    }
 
     // Wait for every queued write to land before we close the stream.
     // Otherwise close() races with in-flight writes and either truncates
@@ -864,6 +1147,32 @@ export class MultiPeerFileTransferService {
         if (incoming.streamingMethod === 'file-system-access' && incoming.writable) {
           await incoming.writable.close();
           console.log(`File from ${incoming.peerId} saved directly to disk via File System Access API`);
+        } else if (incoming.streamingMethod === 'opfs' && incoming.opfsWritable && incoming.opfsHandle) {
+          await incoming.opfsWritable.close();
+          // Deliver the file via <a download> from the OPFS-backed Blob.
+          // The browser streams from the OPFS handle, so memory stays
+          // bounded even for multi-GB files.
+          const file = await incoming.opfsHandle.getFile();
+          const url = URL.createObjectURL(file);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = incoming.fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          // Defer cleanup so the browser has time to start the download.
+          // Keeping the OPFS entry around for a few minutes also means
+          // a dropped download can be re-saved by the user if our session
+          // is still active.
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            if (incoming.opfsName) {
+              navigator.storage.getDirectory()
+                .then((root) => root.removeEntry(incoming.opfsName!))
+                .catch(() => {});
+            }
+          }, 5 * 60 * 1000);
+          console.log(`File from ${incoming.peerId} saved via OPFS + <a download>`);
         } else if (incoming.streamingMethod === 'stream-saver' && incoming.streamSaverWriter) {
           await incoming.streamSaverWriter.close();
           console.log(`File from ${incoming.peerId} saved directly to disk via StreamSaver.js`);
