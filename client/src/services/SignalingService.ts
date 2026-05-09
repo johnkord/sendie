@@ -94,6 +94,15 @@ export class SignalingService {
     }
   }
 
+  /**
+   * Get the local SignalR connection ID once the connection has started.
+   * Returns null before connect() resolves. Used by MultiPeerWebRTCService
+   * for deterministic polite-peer assignment in perfect negotiation.
+   */
+  getLocalConnectionId(): string | null {
+    return this.connection?.connectionId ?? null;
+  }
+
   on<K extends keyof SignalingEvents>(event: K, handler: SignalingEvents[K]): void {
     this.events[event] = handler;
   }

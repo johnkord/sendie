@@ -6,4 +6,5 @@ export { SessionLink } from './SessionLink';
 export { ProtectedRoute } from './ProtectedRoute';
 export { UserHeader } from './UserHeader';
 export { PeerList } from './PeerList';
+export { VoiceControls } from './VoiceControls';
 export { default as Footer } from './Footer';

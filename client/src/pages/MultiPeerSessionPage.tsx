@@ -16,6 +16,7 @@ import {
   SessionLink, 
   UserHeader,
   PeerList,
+  VoiceControls,
   Footer 
 } from '../components';
 import type { KeyPair } from '../types';
@@ -208,12 +209,27 @@ export default function MultiPeerSessionPage() {
           isHostOnlySending: result.isHostOnlySending ?? false,
         });
 
+        // PoC: tell the WebRTC service our own connection ID so it can
+        // assign polite-peer roles deterministically. Must happen before
+        // any peer connections are created.
+        const localConnId = signalingService.getLocalConnectionId();
+        if (localConnId) {
+          multiPeerWebRTCService.setLocalConnectionId(localConnId);
+        }
+
+        // PoC: bound-SAS invariant. If a renegotiation arrives with a
+        // different DTLS fingerprint, tear down with a destructive warning.
+        multiPeerWebRTCService.on('onFingerprintInvariantViolated', (peerId, expected, got) => {
+          console.error(`MITM detected on ${peerId}: fingerprint changed from ${expected} to ${got}`);
+          updatePeer(peerId, { verification: 'failed', status: 'failed' });
+        });
+
         // If there are existing peers, initiate connections to each
         if (result.existingPeers && result.existingPeers.length > 0) {
           for (const peerId of result.existingPeers) {
-            console.log('Creating offer to existing peer:', peerId);
+            console.log('Connecting to existing peer:', peerId);
             addPeer(peerId, { status: 'connecting' });
-            await multiPeerWebRTCService.createOfferTo(peerId);
+            await multiPeerWebRTCService.connectToPeer(peerId);
           }
           updateConnectionStatus();
         }
@@ -301,14 +317,18 @@ export default function MultiPeerSessionPage() {
 
   const handleOffer = useCallback(async (peerId: string, sdp: string) => {
     console.log('Received offer from:', peerId);
-    
-    // Add peer if not already known
-    if (!peers.has(peerId)) {
+
+    // Read peers from getState() rather than the captured closure value.
+    // Renegotiations (e.g. voice start) re-fire onOffer for an existing
+    // peer; a stale closure of `peers` could miss that and call addPeer,
+    // which would reset verification/SAS/friendly-name. addPeer is now
+    // also idempotent for defense-in-depth.
+    if (!useAppStore.getState().peers.has(peerId)) {
       addPeer(peerId, { status: 'connecting' });
     }
-    
+
     await multiPeerWebRTCService.handleOffer(peerId, sdp);
-  }, [peers, addPeer]);
+  }, [addPeer]);
 
   const handleAnswer = useCallback(async (peerId: string, sdp: string) => {
     console.log('Received answer from:', peerId);
@@ -741,6 +761,15 @@ export default function MultiPeerSessionPage() {
               isHost={connection.isHost}
               hostConnectionId={connection.hostConnectionId}
             />
+          </div>
+        )}
+
+        {/* Voice PoC: Start / Stop / Mute. Renders inert until the user
+            explicitly clicks Start. Currently audio-only; see
+            docs/voice-poc-notes.md and the realtime-av proposal. */}
+        {peers.size > 0 && (
+          <div className="mt-4">
+            <VoiceControls />
           </div>
         )}
 

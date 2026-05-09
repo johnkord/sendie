@@ -308,6 +308,11 @@ class VerificationService {
     if (ctx.timeoutHandle) clearTimeout(ctx.timeoutHandle);
     this.contexts.delete(ctx.peerId);
 
+    // Pin the remote DTLS fingerprint observed at verification time. Any
+    // subsequent renegotiation whose SDP fingerprint differs is treated as
+    // a possible MITM and the connection is torn down (PoC: voice/video).
+    multiPeerWebRTCService.pinRemoteFingerprint(ctx.peerId, ctx.remoteFp);
+
     const result: VerificationResult = {
       peerId: ctx.peerId,
       status: 'verified',

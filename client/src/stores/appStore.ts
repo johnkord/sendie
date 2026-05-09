@@ -65,6 +65,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addPeer: (peerId, initialState = {}) =>
     set((state) => {
+      // Idempotent: if the peer already exists, leave its state alone.
+      // A renegotiation (e.g. when voice starts) re-fires onOffer, and a
+      // naive reset would wipe verification status, SAS code, friendly
+      // name, and dataChannelOpen back to 'connecting / pending / null',
+      // which is what we look like on the UI even though the underlying
+      // RTCPeerConnection is perfectly healthy.
+      if (state.peers.has(peerId)) {
+        return state;
+      }
       const newPeers = new Map(state.peers);
       newPeers.set(peerId, {
         peerId,

@@ -27,38 +27,85 @@ Object.defineProperty(globalThis, 'crypto', {
   writable: true,
 });
 
-// Mock RTCPeerConnection
+// Mock RTCPeerConnection. Supports just enough of the perfect-negotiation
+// surface for unit tests: signalingState transitions, the implicit
+// setLocalDescription() form, addTrack/removeTrack/getSenders, and
+// onnegotiationneeded / ontrack callbacks.
 class MockRTCPeerConnection {
   localDescription: RTCSessionDescriptionInit | null = null;
   remoteDescription: RTCSessionDescriptionInit | null = null;
+  signalingState: 'stable' | 'have-local-offer' | 'have-remote-offer' | 'closed' = 'stable';
   iceConnectionState = 'new';
+  // Tracks added via addTrack are exposed here so tests can inspect.
+  private senders: { track: MediaStreamTrack | null; replaceTrack: () => Promise<void> }[] = [];
+  // Allow tests to influence what createOffer/createAnswer return.
+  static nextSdp: string | null = null;
+
   onicecandidate: ((event: { candidate: RTCIceCandidate | null }) => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
   ondatachannel: ((event: { channel: RTCDataChannel }) => void) | null = null;
+  onnegotiationneeded: (() => void) | null = null;
+  ontrack: ((event: { streams: MediaStream[]; track: MediaStreamTrack }) => void) | null = null;
 
   createDataChannel() {
+    // Schedule negotiationneeded asynchronously, like real browsers.
+    queueMicrotask(() => this.onnegotiationneeded?.());
     return new MockRTCDataChannel();
   }
 
+  addTrack(track: MediaStreamTrack, _stream?: MediaStream): unknown {
+    const sender = { track, replaceTrack: async () => {} };
+    this.senders.push(sender);
+    queueMicrotask(() => this.onnegotiationneeded?.());
+    return sender;
+  }
+
+  removeTrack(sender: { track: MediaStreamTrack | null }) {
+    const idx = this.senders.indexOf(sender as never);
+    if (idx >= 0) {
+      this.senders[idx].track = null;
+      queueMicrotask(() => this.onnegotiationneeded?.());
+    }
+  }
+
+  getSenders() {
+    return this.senders;
+  }
+
   async createOffer() {
-    return { type: 'offer', sdp: 'mock-sdp-offer' };
+    return { type: 'offer' as const, sdp: MockRTCPeerConnection.nextSdp ?? 'mock-sdp-offer' };
   }
 
   async createAnswer() {
-    return { type: 'answer', sdp: 'mock-sdp-answer' };
+    return { type: 'answer' as const, sdp: MockRTCPeerConnection.nextSdp ?? 'mock-sdp-answer' };
   }
 
-  async setLocalDescription(desc: RTCSessionDescriptionInit) {
+  async setLocalDescription(desc?: RTCSessionDescriptionInit) {
+    // Implicit form: pick offer or answer based on signalingState.
+    if (!desc) {
+      const type: 'offer' | 'answer' = this.signalingState === 'have-remote-offer' ? 'answer' : 'offer';
+      desc = { type, sdp: MockRTCPeerConnection.nextSdp ?? `mock-sdp-${type}` };
+    }
     this.localDescription = desc;
+    this.signalingState = desc.type === 'offer'
+      ? 'have-local-offer'
+      : (this.signalingState === 'have-remote-offer' ? 'stable' : this.signalingState);
   }
 
   async setRemoteDescription(desc: RTCSessionDescriptionInit) {
     this.remoteDescription = desc;
+    if (desc.type === 'offer') {
+      this.signalingState = 'have-remote-offer';
+    } else if (desc.type === 'answer') {
+      this.signalingState = 'stable';
+    }
   }
 
   async addIceCandidate() {}
 
-  close() {}
+  close() {
+    this.signalingState = 'closed';
+  }
 }
 
 class MockRTCDataChannel {
