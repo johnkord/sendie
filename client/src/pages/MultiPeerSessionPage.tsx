@@ -178,6 +178,25 @@ export default function MultiPeerSessionPage() {
         multiPeerFileTransferService.on('onTransferComplete', (transfer) => 
           updateTransfer(transfer.fileId, transfer)
         );
+        // Surface transfer errors to the user. If the transfer is already
+        // tracked (mid-flight failure), attach the message to the row so
+        // it renders inline. If it is not tracked yet (e.g. an incoming
+        // file that we refused before showing UI for it, like a Firefox
+        // OPFS SecurityError), fall back to alert() so the user actually
+        // sees an explanation instead of silence.
+        multiPeerFileTransferService.on('onTransferError', (fileId, error) => {
+          const message = error?.message ?? 'Transfer failed';
+          const tracked = useAppStore.getState().transfers.some((t) => t.fileId === fileId);
+          if (tracked) {
+            updateTransfer(fileId, { status: 'failed', errorMessage: message });
+          } else {
+            // No row to attach to; the user would otherwise see nothing.
+            // alert() is intentionally crude here; without a toast system
+            // it's the simplest way to make a refusal visible.
+            console.error(`Transfer ${fileId} failed before UI registration:`, message);
+            window.alert(`File transfer could not start:\n\n${message}`);
+          }
+        });
 
         // Join the session
         const result = await signalingService.joinSession(sessionId, sessionSecretRef.current);

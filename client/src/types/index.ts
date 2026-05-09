@@ -74,6 +74,10 @@ export interface TransferState {
   bytesTransferred: number;
   startTime: number | null;
   speed: number; // bytes per second
+  // Human-readable explanation for failed/cancelled transfers. Surfaced
+  // in the UI so the receiver isn't left guessing why a 5GB transfer
+  // dropped (e.g. Firefox blocked OPFS).
+  errorMessage?: string;
 }
 
 export interface ChunkMessage {

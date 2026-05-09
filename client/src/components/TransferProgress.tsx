@@ -77,6 +77,12 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
               </button>
             )}
           </div>
+
+          {isFailed && transfer.errorMessage && (
+            <p className="mt-2 text-xs text-red-300/90 whitespace-pre-wrap break-words">
+              {transfer.errorMessage}
+            </p>
+          )}
         </div>
       </div>
     </div>

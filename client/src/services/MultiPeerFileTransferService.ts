@@ -830,6 +830,10 @@ export class MultiPeerFileTransferService {
         }
       }
 
+      // Track any OPFS failure so we can give a precise diagnosis if
+      // we end up refusing on Firefox below.
+      let opfsError: Error | undefined;
+
       if (!incoming.useStreaming && supportsOPFS) {
         // Always request persistent storage before opening an OPFS
         // writable for a large file. On Firefox in particular this is
@@ -872,6 +876,7 @@ export class MultiPeerFileTransferService {
           incoming.streamingMethod = 'opfs';
           console.log(`Large file from ${peerId} (${(message.fileSize / 1024 / 1024).toFixed(1)}MB) - streaming via OPFS`);
         } catch (err) {
+          opfsError = err as Error;
           console.log('OPFS streaming failed, trying StreamSaver fallback:', err);
         }
       }
@@ -880,6 +885,27 @@ export class MultiPeerFileTransferService {
       // If we got here on Firefox, OPFS already failed; falling further
       // to StreamSaver is worse than refusing with a clear message.
       if (!incoming.useStreaming && isFirefox) {
+        // Decode the OPFS error so the user knows what to do. Firefox
+        // throws SecurityError on getDirectory() when the site has no
+        // permission for persistent storage, which most commonly means:
+        //   - Private Browsing window
+        //   - 'Delete cookies and site data when Firefox is closed' is on
+        //   - Strict ETP / custom cookie blocking treats this site as
+        //     ephemeral
+        //   - The site is not bookmarked/installed and persist() was
+        //     denied by the user (Firefox sometimes makes persist() a
+        //     prerequisite for OPFS quota).
+        const isSecurityError = opfsError?.name === 'SecurityError'
+          || /security/i.test(opfsError?.message ?? '');
+        const detail = isSecurityError
+          ? `Firefox blocked Origin Private File System access (SecurityError on getDirectory). ` +
+            `Most common causes:\n` +
+            `\u2022 You are in a Private Browsing window (OPFS is disabled there).\n` +
+            `\u2022 Settings > Privacy & Security: "Delete cookies and site data when Firefox is closed" is enabled.\n` +
+            `\u2022 Strict Enhanced Tracking Protection or a cookie-blocking extension treats this site as ephemeral.\n` +
+            `\u2022 You declined the persistent-storage prompt for this site.\n\n` +
+            `Fix: open this site in a normal window, allow site data, and bookmark sendie.curlyquote.com (Firefox auto-grants OPFS quota for bookmarked sites). Or use Chrome/Edge.`
+          : `Firefox could not open a reliable streaming target. OPFS (Origin Private File System) is required for large transfers, but it failed: ${opfsError?.message ?? 'unknown error'}. Try Firefox 111+ in a normal window, or use Chrome/Edge.`;
         console.warn('Refusing to use StreamSaver on Firefox; SW lifecycle makes it unreliable.');
         multiPeerWebRTCService.sendTo(
           peerId,
@@ -887,13 +913,7 @@ export class MultiPeerFileTransferService {
         );
         this.events.onTransferError?.(
           message.fileId,
-          new Error(
-            `Could not open a reliable streaming target on Firefox. ` +
-            `OPFS (Origin Private File System) is required for large transfers, ` +
-            `but it is unavailable here (likely Private Browsing, an old Firefox version, ` +
-            `or storage permission was denied). ` +
-            `Try a normal (non-private) Firefox 111+ window, or use Chrome/Edge.`,
-          ),
+          new Error(detail),
         );
         return;
       }
