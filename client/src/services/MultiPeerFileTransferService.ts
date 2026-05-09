@@ -323,16 +323,36 @@ export class MultiPeerFileTransferService {
   }
 
   /**
-   * Aggregate completion check. If every accepted peer has either finished
-   * or the transfer was cancelled, finalize the transfer state.
+   * Aggregate completion check. The transfer is finalized only when every
+   * target peer has reached a terminal state:
+   *   - declined the transfer (in declinedPeers), OR
+   *   - accepted and completed (in completedPeers), OR
+   *   - disconnected before completing (treated as completed via
+   *     handlePeerDisconnected so we don't hang).
+   *
+   * The earlier "all accepted peers completed" check was wrong when accepts
+   * arrived serially: a fast first receiver could complete before slower
+   * receivers had clicked Accept, satisfying the vacuous "every accepter
+   * is done" check. The transfer would be deleted, and subsequent
+   * file-accept messages would be dropped because lookup returned undefined.
+   * Symptom: only the first receiver ever got the file.
    */
   private checkTransferComplete(transfer: BroadcastTransfer, cancelledByThisPeer: boolean): void {
     if (!this.broadcastTransfers.has(transfer.fileId)) return;
 
-    const allDone = [...transfer.acceptedPeers].every((p) => transfer.completedPeers.has(p));
-    if (!allDone) return;
+    // Every target must have a terminal state.
+    const allTargetsResolved = transfer.targetPeers.every(
+      (p) => transfer.declinedPeers.has(p) || transfer.completedPeers.has(p),
+    );
+    if (!allTargetsResolved) return;
 
-    if (transfer.cancelled || (cancelledByThisPeer && transfer.acceptedPeers.size === transfer.completedPeers.size && transfer.acceptedPeers.size === 0)) {
+    // Of the accepters, every one must have completed.
+    const allAcceptersCompleted = [...transfer.acceptedPeers].every(
+      (p) => transfer.completedPeers.has(p),
+    );
+    if (!allAcceptersCompleted) return;
+
+    if (transfer.cancelled || (cancelledByThisPeer && transfer.acceptedPeers.size === 0)) {
       transfer.state.status = 'cancelled';
     } else {
       transfer.state.status = 'completed';
@@ -836,11 +856,28 @@ export class MultiPeerFileTransferService {
    * Notify the service that a peer has disconnected. Active outbound
    * transfers to that peer are tidied up so they don't hang in
    * "waiting for slow peer" forever.
+   *
+   * Three cases:
+   *   - peer was actively receiving (in acceptedPeers but not completedPeers):
+   *     mark them completed so the aggregate completion check moves on.
+   *   - peer was a target who never accepted or declined: treat as decline
+   *     so the transfer can finalize for the remaining peers.
+   *   - peer had nothing in flight: nothing to do.
    */
   handlePeerDisconnected(peerId: string): void {
     for (const transfer of this.broadcastTransfers.values()) {
-      if (transfer.acceptedPeers.has(peerId) && !transfer.completedPeers.has(peerId)) {
+      const wasReceiving = transfer.acceptedPeers.has(peerId)
+        && !transfer.completedPeers.has(peerId);
+      const wasUnresolved = transfer.targetPeers.includes(peerId)
+        && !transfer.acceptedPeers.has(peerId)
+        && !transfer.declinedPeers.has(peerId);
+
+      if (wasReceiving) {
         transfer.completedPeers.add(peerId);
+        this.checkTransferComplete(transfer, true);
+      } else if (wasUnresolved) {
+        transfer.declinedPeers.add(peerId);
+        this.events.onFileDeclined?.(peerId, transfer.fileId);
         this.checkTransferComplete(transfer, true);
       }
     }
