@@ -122,7 +122,7 @@ export function CameraControls() {
             <select
               value={deviceId}
               onChange={(e) => handleDeviceChange(e.target.value)}
-              className="text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 focus:outline-none focus:border-blue-500 max-w-[18rem]"
+              className="text-xs bg-slate-950/60 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-blue-500 max-w-[18rem]"
               title="Pick a video input device, including OBS Virtual Camera if running."
             >
               <option value="">Default device</option>

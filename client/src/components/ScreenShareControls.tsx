@@ -80,7 +80,7 @@ export function ScreenShareControls() {
             className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${
               supported
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                : 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                : 'bg-slate-800 text-slate-500 cursor-not-allowed'
             }`}
             title={
               supported
@@ -107,7 +107,7 @@ export function ScreenShareControls() {
             </label>
           ) : (
             <span
-              className="text-xs text-gray-500"
+              className="text-xs text-slate-500"
               title="Sharing tab/system audio is only supported on Chrome and Edge desktop. Your browser does not support it."
             >
               🔇 audio not available in this browser

@@ -17,11 +17,11 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
 
   return (
     <div className={`
-      bg-gray-800/50 rounded-lg p-4 border
-      ${isComplete ? 'border-green-500/30' : isFailed ? 'border-red-500/30' : 'border-gray-700'}
+      rounded-xl p-4 border bg-slate-900/40
+      ${isComplete ? 'border-emerald-500/30' : isFailed ? 'border-red-500/30' : 'border-slate-700/50'}
     `}>
       <div className="flex items-start gap-3">
-        <span className="text-2xl">{icon}</span>
+        <span className="text-2xl" aria-hidden>{icon}</span>
         
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
@@ -30,28 +30,28 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
             </h3>
             <span className={`
               text-xs px-2 py-0.5 rounded-full
-              ${transfer.direction === 'send' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'}
+              ${transfer.direction === 'send' ? 'bg-blue-500/15 text-blue-300' : 'bg-purple-500/15 text-purple-300'}
             `}>
               {transfer.direction === 'send' ? '↑ Sending' : '↓ Receiving'}
             </span>
           </div>
           
-          <p className="text-sm text-gray-400 mt-1">
+          <p className="text-sm text-slate-400 mt-1">
             {formatFileSize(transfer.bytesTransferred)} / {formatFileSize(transfer.fileSize)}
             {isActive && transfer.speed > 0 && (
-              <span className="ml-2">• {formatSpeed(transfer.speed)}</span>
+              <span className="ml-2">· {formatSpeed(transfer.speed)}</span>
             )}
             {isActive && (
-              <span className="ml-2">• ETA: {eta}</span>
+              <span className="ml-2">· ETA: {eta}</span>
             )}
           </p>
 
           {/* Progress bar */}
-          <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
+          <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
             <div
               className={`
                 h-full transition-all duration-300
-                ${isComplete ? 'bg-green-500' : isFailed ? 'bg-red-500' : 'bg-purple-500'}
+                ${isComplete ? 'bg-emerald-500' : isFailed ? 'bg-red-500' : 'bg-purple-500'}
               `}
               style={{ width: `${progress}%` }}
             />
@@ -60,7 +60,7 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
           <div className="flex items-center justify-between mt-2">
             <span className={`
               text-sm
-              ${isComplete ? 'text-green-400' : isFailed ? 'text-red-400' : 'text-gray-400'}
+              ${isComplete ? 'text-emerald-400' : isFailed ? 'text-red-400' : 'text-slate-400'}
             `}>
               {isComplete && '✓ Complete'}
               {isFailed && (transfer.status === 'cancelled' ? '✕ Cancelled' : '✕ Failed')}
@@ -70,7 +70,7 @@ export function TransferProgress({ transfer, onCancel }: TransferProgressProps) 
             {isActive && onCancel && (
               <button
                 onClick={onCancel}
-                className="text-sm text-gray-400 hover:text-red-400 transition-colors"
+                className="text-sm text-slate-400 hover:text-red-400 transition-colors"
                 title="Cancel this file transfer"
               >
                 Cancel

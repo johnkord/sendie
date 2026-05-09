@@ -135,9 +135,9 @@ export default function HomePage() {
       <div className="max-w-md w-full">
         {/* Kicked Message */}
         {kickedMessage && (
-          <div className="mb-6 p-4 bg-red-900/30 border border-red-600/50 rounded-lg">
+          <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30">
             <div className="flex items-center gap-2">
-              <span>🚫</span>
+              <span aria-hidden>🚫</span>
               <p className="text-red-300">{kickedMessage}</p>
             </div>
             <button
@@ -152,12 +152,12 @@ export default function HomePage() {
         {/* Logo and Title */}
         <div className="text-center mb-8">
           <h1 className="text-5xl font-bold text-white mb-2">
-            📤 Sendie
+            <span aria-hidden>📤</span> Sendie
           </h1>
-          <p className="text-xl text-gray-300">
+          <p className="text-xl text-slate-300">
             Secure P2P File Transfer
           </p>
-          <p className="text-gray-500 mt-2">
+          <p className="text-slate-500 mt-2">
             Share files directly between browsers. No upload limits. End-to-end encrypted.
           </p>
         </div>
@@ -169,21 +169,20 @@ export default function HomePage() {
           className={`
             w-full py-4 px-6 rounded-xl font-semibold text-lg
             transition-all duration-200
-            ${loading 
-              ? 'bg-gray-600 cursor-not-allowed' 
-              : 'bg-purple-600 hover:bg-purple-700 hover:scale-[1.02] active:scale-[0.98]'
+            ${loading
+              ? 'bg-slate-700 cursor-not-allowed text-slate-400'
+              : 'bg-purple-600 hover:bg-purple-700 hover:scale-[1.02] active:scale-[0.98] text-white shadow-lg shadow-purple-500/25'
             }
-            text-white shadow-lg shadow-purple-500/25
           `}
         >
-          {loading ? 'Creating...' : 'Create New Session'}
+          {loading ? 'Creating...' : 'Create new session'}
         </button>
 
         {/* Divider */}
         <div className="flex items-center gap-4 my-6">
-          <div className="flex-1 h-px bg-gray-700" />
-          <span className="text-gray-500 text-sm">or</span>
-          <div className="flex-1 h-px bg-gray-700" />
+          <div className="flex-1 h-px bg-slate-700/60" />
+          <span className="text-slate-500 text-sm">or</span>
+          <div className="flex-1 h-px bg-slate-700/60" />
         </div>
 
         {/* Join Session Form */}
@@ -196,8 +195,8 @@ export default function HomePage() {
             disabled={loading}
             className={`
               w-full px-4 py-3 rounded-xl
-              bg-gray-800 border border-gray-700
-              text-white placeholder-gray-500
+              bg-slate-900/50 border border-slate-700/60
+              text-white placeholder-slate-500
               focus:outline-none focus:border-purple-500
               transition-colors
               ${loading ? 'opacity-50 cursor-not-allowed' : ''}
@@ -211,12 +210,12 @@ export default function HomePage() {
               w-full py-3 px-6 rounded-xl font-medium
               transition-all duration-200
               ${loading || !joinSessionId.trim()
-                ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                : 'bg-gray-700 hover:bg-gray-600 text-white'
+                ? 'bg-slate-800/50 text-slate-500 cursor-not-allowed border border-slate-700/40'
+                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
               }
             `}
           >
-            Join Session
+            Join session
           </button>
         </form>
 
@@ -245,16 +244,16 @@ export default function HomePage() {
         {/* Features */}
         <div className="mt-12 grid grid-cols-3 gap-4 text-center">
           <div className="p-3">
-            <div className="text-2xl mb-1">🔒</div>
-            <p className="text-xs text-gray-400">End-to-End Encrypted</p>
+            <div className="text-2xl mb-1" aria-hidden>🔒</div>
+            <p className="text-xs text-slate-400">End-to-end encrypted</p>
           </div>
           <div className="p-3">
-            <div className="text-2xl mb-1">🚀</div>
-            <p className="text-xs text-gray-400">No Size Limits</p>
+            <div className="text-2xl mb-1" aria-hidden>🚀</div>
+            <p className="text-xs text-slate-400">No size limits</p>
           </div>
           <div className="p-3">
-            <div className="text-2xl mb-1">�</div>
-            <p className="text-xs text-gray-400">Up to 10 Peers</p>
+            <div className="text-2xl mb-1" aria-hidden>👥</div>
+            <p className="text-xs text-slate-400">Up to 10 peers</p>
           </div>
         </div>
 

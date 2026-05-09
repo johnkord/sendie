@@ -33,62 +33,55 @@ export function FileQueue({
   }, [broadcastFiles, onRemoveFile]);
 
   return (
-    <div className="space-y-4">
-      {/* Broadcast Mode Toggle */}
-      <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-xl">📡</span>
-            <div>
-              <span className="text-sm font-medium text-gray-300">Broadcast Mode</span>
-              <p className="text-xs text-gray-500">
-                {broadcastMode 
-                  ? 'Files will auto-send to everyone who joins' 
-                  : 'Enable to send files to all new joiners'}
-              </p>
-            </div>
+    <div className="space-y-3">
+      {/* Broadcast Mode toggle: compact strip rather than a full card */}
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-700/50 bg-slate-900/40 px-3 py-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-base" aria-hidden>📡</span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-slate-200">Broadcast mode</div>
+            <p className="text-xs text-slate-500 truncate">
+              {broadcastMode
+                ? 'New joiners auto-receive'
+                : 'Send queued files to anyone who joins'}
+            </p>
           </div>
-          <button
-            onClick={onToggleBroadcastMode}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              broadcastMode ? 'bg-purple-600' : 'bg-gray-600'
-            }`}
-            title={broadcastMode ? 'Disable broadcast mode' : 'Enable broadcast mode - files will auto-send to new joiners'}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                broadcastMode ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
         </div>
+        <button
+          onClick={onToggleBroadcastMode}
+          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+            broadcastMode ? 'bg-purple-500' : 'bg-slate-600'
+          }`}
+          title={broadcastMode ? 'Disable broadcast mode' : 'Enable broadcast mode'}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+              broadcastMode ? 'translate-x-5' : 'translate-x-1'
+            }`}
+          />
+        </button>
       </div>
 
       {/* Queued Files (One-time) */}
       {oneTimeFiles.length > 0 && (
-        <div className="p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <span className="text-lg">📋</span>
-              <span className="text-sm font-medium text-gray-300">
-                Queued Files ({oneTimeFiles.length})
-              </span>
-              <span className="text-xs text-gray-500">
-                {formatFileSize(totalOneTimeSize)} total
+        <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+              <span aria-hidden>📋</span>
+              <span>Queued · {oneTimeFiles.length}</span>
+              <span className="text-slate-500 normal-case tracking-normal">
+                {formatFileSize(totalOneTimeSize)}
               </span>
             </div>
             <button
               onClick={handleClearOneTime}
-              className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+              className="text-xs text-slate-400 hover:text-red-400 transition-colors"
               title="Remove all queued files"
             >
-              Clear all
+              Clear
             </button>
           </div>
-          <p className="text-xs text-gray-500 mb-3">
-            These files will be sent when someone joins the session.
-          </p>
-          <div className="space-y-2 max-h-48 overflow-y-auto">
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
             {oneTimeFiles.map((qf) => (
               <FileQueueItem
                 key={qf.id}
@@ -102,29 +95,27 @@ export function FileQueue({
 
       {/* Broadcast Files */}
       {broadcastFiles.length > 0 && (
-        <div className="p-4 bg-purple-900/30 rounded-lg border border-purple-700/50">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <span className="text-lg">📡</span>
-              <span className="text-sm font-medium text-purple-300">
-                Broadcast Files ({broadcastFiles.length})
-              </span>
-              <span className="text-xs text-purple-400">
-                {formatFileSize(totalBroadcastSize)} total
+        <div className="rounded-xl border border-purple-500/30 bg-purple-500/5 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-purple-300">
+              <span aria-hidden>📡</span>
+              <span>Broadcast · {broadcastFiles.length}</span>
+              <span className="text-purple-400/80 normal-case tracking-normal">
+                {formatFileSize(totalBroadcastSize)}
               </span>
             </div>
             <button
               onClick={handleClearBroadcast}
-              className="text-xs text-purple-400 hover:text-red-400 transition-colors"
+              className="text-xs text-purple-300 hover:text-red-400 transition-colors"
               title="Remove all broadcast files"
             >
-              Clear all
+              Clear
             </button>
           </div>
-          <p className="text-xs text-purple-400/70 mb-3">
-            These files will be sent to everyone who joins.
+          <p className="text-xs text-purple-300/70 mb-2">
+            Sent to everyone who joins.
           </p>
-          <div className="space-y-2 max-h-48 overflow-y-auto">
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
             {broadcastFiles.map((qf) => (
               <FileQueueItem
                 key={qf.id}
@@ -150,18 +141,18 @@ function FileQueueItem({ queuedFile, onRemove, isBroadcast }: FileQueueItemProps
   const { file } = queuedFile;
 
   return (
-    <div 
+    <div
       className={`flex items-center justify-between p-2 rounded-md ${
-        isBroadcast ? 'bg-purple-800/30' : 'bg-gray-700/50'
+        isBroadcast ? 'bg-purple-500/10' : 'bg-slate-800/40'
       }`}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">
-        <span className="text-sm">📄</span>
+        <span className="text-sm" aria-hidden>📄</span>
         <div className="min-w-0 flex-1">
-          <p className={`text-sm truncate ${isBroadcast ? 'text-purple-200' : 'text-gray-200'}`}>
+          <p className={`text-sm truncate ${isBroadcast ? 'text-purple-100' : 'text-slate-200'}`}>
             {file.name}
           </p>
-          <p className={`text-xs ${isBroadcast ? 'text-purple-400' : 'text-gray-500'}`}>
+          <p className={`text-xs ${isBroadcast ? 'text-purple-300/80' : 'text-slate-500'}`}>
             {formatFileSize(file.size)}
           </p>
         </div>
@@ -169,9 +160,9 @@ function FileQueueItem({ queuedFile, onRemove, isBroadcast }: FileQueueItemProps
       <button
         onClick={onRemove}
         className={`p-1 rounded transition-colors ${
-          isBroadcast 
-            ? 'text-purple-400 hover:text-red-400 hover:bg-purple-800/50' 
-            : 'text-gray-400 hover:text-red-400 hover:bg-gray-700'
+          isBroadcast
+            ? 'text-purple-300 hover:text-red-400 hover:bg-purple-500/20'
+            : 'text-slate-400 hover:text-red-400 hover:bg-slate-700'
         }`}
         title="Remove from queue"
       >

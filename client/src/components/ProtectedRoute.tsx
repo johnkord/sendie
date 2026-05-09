@@ -20,10 +20,10 @@ export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRout
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500 mx-auto mb-4"></div>
+          <p className="text-slate-400">Loading...</p>
         </div>
       </div>
     );
@@ -31,14 +31,14 @@ export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRout
 
   if (!user) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center max-w-md px-4">
-          <h1 className="text-3xl font-bold text-white mb-2">📤 Sendie</h1>
-          <p className="text-gray-400 mb-8">Secure P2P File Transfer</p>
+          <h1 className="text-3xl font-bold text-white mb-2"><span aria-hidden>📤</span> Sendie</h1>
+          <p className="text-slate-400 mb-8">Secure P2P File Transfer</p>
           
-          <div className="bg-gray-800/50 rounded-lg p-6 border border-gray-700">
-            <h2 className="text-xl font-semibold text-white mb-4">Authentication Required</h2>
-            <p className="text-gray-400 mb-6">Please sign in with Discord to continue.</p>
+          <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-6">
+            <h2 className="text-xl font-semibold text-white mb-4">Authentication required</h2>
+            <p className="text-slate-400 mb-6">Please sign in with Discord to continue.</p>
             <button
               onClick={() => authService.login(window.location.href)}
               className="w-full px-6 py-3 bg-[#5865F2] hover:bg-[#4752C4] text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
@@ -56,26 +56,26 @@ export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRout
 
   if (!user.isAllowed) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center max-w-md px-4">
-          <div className="bg-red-900/30 rounded-lg p-6 border border-red-500/30">
-            <h1 className="text-2xl font-bold text-white mb-4">Access Denied</h1>
-            <p className="text-gray-300 mb-2">Your Discord account is not on the allow-list.</p>
-            <p className="text-gray-500 text-sm mb-6">Contact an administrator for access.</p>
+          <div className="rounded-xl bg-red-500/10 p-6 border border-red-500/30">
+            <h1 className="text-2xl font-bold text-white mb-4">Access denied</h1>
+            <p className="text-slate-200 mb-2">Your Discord account is not on the allow-list.</p>
+            <p className="text-slate-500 text-sm mb-6">Contact an administrator for access.</p>
             
-            <div className="flex items-center justify-center gap-3 mb-6 p-3 bg-gray-800 rounded-lg">
+            <div className="flex items-center justify-center gap-3 mb-6 p-3 bg-slate-900/40 border border-slate-700/50 rounded-lg">
               {user.avatarUrl && (
                 <img src={user.avatarUrl} alt="" className="w-10 h-10 rounded-full" />
               )}
               <div className="text-left">
                 <p className="text-white font-medium">{user.displayName}</p>
-                <p className="text-gray-400 text-sm">@{user.username}</p>
+                <p className="text-slate-400 text-sm">@{user.username}</p>
               </div>
             </div>
             
             <button
               onClick={() => authService.logout()}
-              className="text-gray-400 hover:text-white transition-colors"
+              className="text-slate-400 hover:text-white transition-colors"
             >
               Sign out and try another account
             </button>
@@ -87,11 +87,11 @@ export function ProtectedRoute({ children, requireAdmin = false }: ProtectedRout
 
   if (requireAdmin && !user.isAdmin) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center max-w-md px-4">
-          <div className="bg-yellow-900/30 rounded-lg p-6 border border-yellow-500/30">
-            <h1 className="text-2xl font-bold text-white mb-4">Admin Access Required</h1>
-            <p className="text-gray-300">You don't have permission to view this page.</p>
+          <div className="rounded-xl bg-amber-500/10 p-6 border border-amber-500/30">
+            <h1 className="text-2xl font-bold text-white mb-4">Admin access required</h1>
+            <p className="text-slate-200">You don't have permission to view this page.</p>
           </div>
         </div>
       </div>

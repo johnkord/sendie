@@ -21,7 +21,7 @@ export function RemoteVideos({ peers }: RemoteVideosProps) {
   if (sharing.length === 0) return null;
 
   return (
-    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3">
       <div className="flex flex-wrap gap-3">
         {sharing.map(([peerId, p]) => (
           <RemoteVideoTile key={peerId} peerId={peerId} peer={p} />

@@ -22,7 +22,7 @@ export function RemoteScreens({ peers }: RemoteScreensProps) {
   if (sharing.length === 0) return null;
 
   return (
-    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700 space-y-3">
+    <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-3 space-y-3">
       {sharing.map(([peerId, p]) => (
         <RemoteScreenTile key={peerId} peerId={peerId} peer={p} />
       ))}

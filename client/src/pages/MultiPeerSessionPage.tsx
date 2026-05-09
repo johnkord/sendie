@@ -703,8 +703,11 @@ export default function MultiPeerSessionPage() {
             the main column (drop zone, transfers, live screens) reads
             as the primary surface. */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* ---------- SIDEBAR ---------- */}
-          <aside className="space-y-4 lg:col-span-4 xl:col-span-3">
+          {/* ---------- SIDEBAR ----------
+              order-2 on mobile so the primary action (drop zone in
+              <main>) reads first. lg:order-1 puts it back to the left
+              on desktop. */}
+          <aside className="space-y-4 order-2 lg:order-1 lg:col-span-4 xl:col-span-3">
             <ConnectionStatusDisplay
               status={connection.status}
               sessionId={connection.sessionId}
@@ -801,7 +804,7 @@ export default function MultiPeerSessionPage() {
           </aside>
 
           {/* ---------- MAIN ---------- */}
-          <main className="space-y-6 lg:col-span-8 xl:col-span-9">
+          <main className="space-y-6 order-1 lg:order-2 lg:col-span-8 xl:col-span-9">
             {/* Live remote tiles dominate when active. */}
             {peers.size > 0 && (
               <div className="space-y-4">

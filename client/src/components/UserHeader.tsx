@@ -17,12 +17,12 @@ export function UserHeader() {
   };
 
   return (
-    <header className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between">
+    <header className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-10">
       <div className="flex items-center gap-2">
         {user.isAdmin && (
           <button
             onClick={() => navigate('/admin')}
-            className="px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+            className="px-3 py-1.5 text-sm text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
           >
             Admin
           </button>
@@ -30,7 +30,7 @@ export function UserHeader() {
       </div>
       
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/50 rounded-lg">
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/40 border border-slate-700/50 rounded-lg">
           {user.avatarUrl && (
             <img 
               src={user.avatarUrl} 
@@ -38,12 +38,12 @@ export function UserHeader() {
               className="w-6 h-6 rounded-full"
             />
           )}
-          <span className="text-sm text-gray-300">{user.displayName}</span>
+          <span className="text-sm text-slate-200">{user.displayName}</span>
         </div>
         
         <button
           onClick={handleLogout}
-          className="px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
+          className="px-3 py-1.5 text-sm text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
         >
           Sign out
         </button>

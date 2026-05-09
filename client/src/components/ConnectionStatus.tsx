@@ -27,12 +27,16 @@ export function ConnectionStatusDisplay({
 }: ConnectionStatusProps) {
   const config = statusConfig[status];
   const isRateLimitError = error?.includes('wait') || error?.includes('⏱️');
+  // Pulse the indicator while we're not in a settled state. Tiny detail
+  // but turns "static char that means connecting" into "system is doing
+  // something on your behalf right now".
+  const isPending = status === 'connecting' || status === 'waiting-for-peer' || status === 'partially-connected';
 
   return (
     <div className="rounded-xl border border-slate-700/50 bg-slate-900/40 p-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className={`text-lg ${config.color}`} aria-hidden>{config.icon}</span>
+          <span className={`text-lg ${config.color} ${isPending ? 'animate-pulse' : ''}`} aria-hidden>{config.icon}</span>
           <span className={`text-sm font-medium ${config.color}`}>{config.label}</span>
         </div>
 

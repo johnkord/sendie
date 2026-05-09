@@ -72,10 +72,10 @@ export function VoiceControls() {
       {!active ? (
         <button
           onClick={handleStart}
-          className="px-3 py-1.5 rounded-md text-sm font-medium bg-green-600 hover:bg-green-700 text-white transition-colors flex items-center gap-2"
+          className="px-3 py-1.5 rounded-md text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-2"
           title="Start voice (requires mic permission)"
         >
-          <span>🎙️</span>
+          <span aria-hidden>🎙️</span>
           <span>Start voice</span>
         </button>
       ) : (
@@ -91,8 +91,8 @@ export function VoiceControls() {
             onClick={handleToggleMute}
             className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
               muted
-                ? 'bg-gray-700 text-gray-300 border-gray-600'
-                : 'bg-purple-600/20 text-purple-300 border-purple-600/40'
+                ? 'bg-slate-800 text-slate-300 border-slate-700'
+                : 'bg-purple-500/15 text-purple-300 border-purple-500/40'
             }`}
             title={muted ? 'Unmute' : 'Mute'}
           >
@@ -106,7 +106,7 @@ export function VoiceControls() {
               return (
                 <span
                   key={i}
-                  className={`w-1 rounded-sm transition-colors ${lit ? 'bg-green-400' : 'bg-gray-700'}`}
+                  className={`w-1 rounded-sm transition-colors ${lit ? 'bg-emerald-400' : 'bg-slate-700'}`}
                   style={{ height: `${(i + 1) * 12.5}%` }}
                 />
               );
