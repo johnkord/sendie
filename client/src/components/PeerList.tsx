@@ -61,28 +61,35 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, i
               key={peerId}
               className="flex items-center justify-between gap-2 p-2 bg-slate-800/40 rounded-lg border border-slate-700/30"
             >
-              <div className="flex items-center gap-3 min-w-0">
-                <span className={`text-base ${config.color}`} aria-hidden>{config.icon}</span>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <p className="text-sm text-white font-mono truncate">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <span className={`text-base shrink-0 ${config.color}`} aria-hidden>{config.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-1.5 min-w-0">
+                    {/*
+                      break-all on the friendly name so a long hyphenated
+                      string ('elderberry-garnet-larch-honeysuckle') wraps
+                      cleanly inside the column instead of overflowing into
+                      the action buttons. min-w-0 on the parent flex item is
+                      required for the wrap to take effect.
+                    */}
+                    <p className="text-sm text-white font-mono break-all leading-tight">
                       {displayName}
                     </p>
                     {isPeerHost && (
-                      <span className="px-1 py-0.5 bg-amber-500/15 text-amber-300 text-[10px] rounded border border-amber-500/30">
+                      <span className="shrink-0 px-1 py-0.5 bg-amber-500/15 text-amber-300 text-[10px] rounded border border-amber-500/30">
                         👑
                       </span>
                     )}
                     {state.voiceState?.sharing && (
                       <span
-                        className={`text-sm ${state.voiceState.muted ? 'text-slate-400' : 'text-emerald-400'}`}
+                        className={`shrink-0 text-sm ${state.voiceState.muted ? 'text-slate-400' : 'text-emerald-400'}`}
                         title={state.voiceState.muted ? 'Microphone muted' : 'Speaking'}
                       >
                         {state.voiceState.muted ? '🔇' : '🎙️'}
                       </span>
                     )}
                   </div>
-                  <p className={`text-xs ${config.color}`}>
+                  <p className={`mt-0.5 text-xs ${config.color}`}>
                     {config.label}
                     {state.dataChannelOpen && ' · Ready'}
                   </p>

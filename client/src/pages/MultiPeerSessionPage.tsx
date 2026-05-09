@@ -706,8 +706,9 @@ export default function MultiPeerSessionPage() {
           {/* ---------- SIDEBAR ----------
               order-2 on mobile so the primary action (drop zone in
               <main>) reads first. lg:order-1 puts it back to the left
-              on desktop. */}
-          <aside className="space-y-4 order-2 lg:order-1 lg:col-span-4 xl:col-span-3">
+              on desktop. col-span-5 / 4 leaves room for long peer
+              names without immediately wrapping. */}
+          <aside className="space-y-4 order-2 lg:order-1 lg:col-span-5 xl:col-span-4">
             <ConnectionStatusDisplay
               status={connection.status}
               sessionId={connection.sessionId}
@@ -803,8 +804,13 @@ export default function MultiPeerSessionPage() {
             {peers.size > 0 && <ChatPanel />}
           </aside>
 
-          {/* ---------- MAIN ---------- */}
-          <main className="space-y-6 order-1 lg:order-2 lg:col-span-8 xl:col-span-9">
+          {/* ---------- MAIN ----------
+              col-span-7 / 8 to balance the wider sidebar.
+              min-h with flex-col so a near-empty main (just the drop
+              zone) centers vertically instead of stranding the drop
+              zone at the top with empty space below. The threshold is
+              the typical sidebar height. */}
+          <main className="space-y-6 order-1 lg:order-2 lg:col-span-7 xl:col-span-8 lg:flex lg:flex-col lg:min-h-[36rem]">
             {/* Live remote tiles dominate when active. */}
             {peers.size > 0 && (
               <div className="space-y-4">
@@ -849,23 +855,29 @@ export default function MultiPeerSessionPage() {
             )}
 
             {/* Drop zone: this is THE primary action of the page, so
-                it gets emphasis. The component renders larger when no
-                transfers are active to draw the eye. */}
-            <FileDropZone
-              onFilesSelected={handleFilesSelected}
-              disabled={!canSendFiles && !canQueueFiles}
-              disabledMessage={hostOnlyRestricted ? 'Only the host can send files in this session' : undefined}
-              variant={transfers.length === 0 ? 'hero' : 'compact'}
-            />
+                it gets emphasis. The wrapping div gets flex-1 so the
+                empty-state hero variant grows to fill the empty main
+                column instead of stranding at the top. */}
+            <div className={transfers.length === 0 && peers.size === 0 ? 'lg:flex-1 lg:flex lg:items-center' : ''}>
+              <div className="w-full">
+                <FileDropZone
+                  onFilesSelected={handleFilesSelected}
+                  disabled={!canSendFiles && !canQueueFiles}
+                  disabledMessage={hostOnlyRestricted ? 'Only the host can send files in this session' : undefined}
+                  variant={transfers.length === 0 ? 'hero' : 'compact'}
+                />
 
-            {/* Inline help only when it adds new info that the buttons
-                don't already convey. The "all transfers are E2E
-                encrypted" line lives in the Footer; no need to repeat. */}
-            {connection.status === 'waiting-for-peer' && queuedFiles.length > 0 && (
-              <p className="text-center text-sm text-slate-400">
-                Files queued. They'll send automatically when someone joins.
-              </p>
-            )}
+                {/* Inline help only when it adds new info that the
+                    buttons don't already convey. The "all transfers
+                    are E2E encrypted" line lives in the Footer; no
+                    need to repeat. */}
+                {connection.status === 'waiting-for-peer' && queuedFiles.length > 0 && (
+                  <p className="mt-4 text-center text-sm text-slate-400">
+                    Files queued. They'll send automatically when someone joins.
+                  </p>
+                )}
+              </div>
+            </div>
           </main>
         </div>
 
