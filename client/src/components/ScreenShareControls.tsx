@@ -110,7 +110,7 @@ export function ScreenShareControls() {
               className="text-xs text-slate-500"
               title="Sharing tab/system audio is only supported on Chrome and Edge desktop. Your browser does not support it."
             >
-              🔇 audio not available in this browser
+              🔇 audio not available in screen sharing in this browser
             </span>
           )}
         </>
