@@ -78,6 +78,12 @@ interface IncomingTransfer {
   useStreaming: boolean;
   streamingMethod: 'none' | 'file-system-access' | 'stream-saver';
   state: TransferState;
+  // Tail of the write-queue promise chain. handleChunkData links new
+  // writes onto this so they execute in arrival order against the
+  // FileSystemWritableFileStream / StreamSaver writer (both reject
+  // concurrent writes). This also makes bytesTransferred reflect actual
+  // committed bytes, not just received bytes, so the UI is honest.
+  writeQueueTail: Promise<void>;
 }
 
 /**
@@ -629,6 +635,7 @@ export class MultiPeerFileTransferService {
       useStreaming: false,
       streamingMethod: 'none',
       state,
+      writeQueueTail: Promise.resolve(),
     };
 
     // For large files, try to set up streaming to disk.
@@ -709,7 +716,7 @@ export class MultiPeerFileTransferService {
     }
   }
 
-  private async handleChunkData(peerId: string, data: ArrayBuffer): Promise<void> {
+  private handleChunkData(peerId: string, data: ArrayBuffer): void {
     const fileId = this.currentIncomingFileId.get(peerId);
     if (!fileId) {
       console.error(`Received chunk data from ${peerId} without file ID`);
@@ -723,34 +730,49 @@ export class MultiPeerFileTransferService {
       return;
     }
 
-    // Stream to disk or store in memory based on method
-    if (incoming.useStreaming) {
+    // Serialize writes through the per-transfer queue. Critical for two
+    // reasons:
+    //   1. FileSystemWritableFileStream and StreamSaver's writer both
+    //      reject concurrent writes (some browsers throw InvalidStateError,
+    //      some silently drop). Without serialization, big files showed
+    //      as "750MB sent / 64KB received" because most chunks faulted
+    //      on the receiver and the sender kept blasting.
+    //   2. bytesTransferred should reflect actually-committed bytes, not
+    //      arrived bytes. Otherwise the UI claims success while data is
+    //      still queued in front of a slow disk and an error mid-stream
+    //      would lose chunks the UI already counted.
+    incoming.writeQueueTail = incoming.writeQueueTail.then(async () => {
       try {
-        if (incoming.streamingMethod === 'file-system-access' && incoming.writable) {
-          await incoming.writable.write(data);
-        } else if (incoming.streamingMethod === 'stream-saver' && incoming.streamSaverWriter) {
-          await incoming.streamSaverWriter.write(new Uint8Array(data));
+        if (incoming.useStreaming) {
+          if (incoming.streamingMethod === 'file-system-access' && incoming.writable) {
+            await incoming.writable.write(data);
+          } else if (incoming.streamingMethod === 'stream-saver' && incoming.streamSaverWriter) {
+            await incoming.streamSaverWriter.write(new Uint8Array(data));
+          }
+        } else {
+          incoming.receivedChunks.push(data);
         }
+        incoming.state.bytesTransferred += data.byteLength;
+        const elapsed = (Date.now() - incoming.state.startTime!) / 1000;
+        incoming.state.speed = elapsed > 0
+          ? incoming.state.bytesTransferred / elapsed
+          : 0;
+        this.events.onTransferProgress?.(incoming.state);
       } catch (err) {
         console.error(`Error writing chunk from ${peerId} to disk:`, err);
         incoming.state.status = 'error';
         this.events.onTransferError?.(incoming.fileId, err as Error);
-        return;
       }
-    } else {
-      incoming.receivedChunks.push(data);
-    }
-
-    incoming.state.bytesTransferred += data.byteLength;
-
-    const elapsed = (Date.now() - incoming.state.startTime!) / 1000;
-    incoming.state.speed = elapsed > 0 ? incoming.state.bytesTransferred / elapsed : 0;
-
-    this.events.onTransferProgress?.(incoming.state);
+    });
   }
 
   private async completeIncomingTransfer(incoming: IncomingTransfer): Promise<void> {
     const key = `${incoming.peerId}:${incoming.fileId}`;
+
+    // Wait for every queued write to land before we close the stream.
+    // Otherwise close() races with in-flight writes and either truncates
+    // the file or throws InvalidStateError.
+    await incoming.writeQueueTail;
 
     if (incoming.useStreaming) {
       try {

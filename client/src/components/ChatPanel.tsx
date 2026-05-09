@@ -10,7 +10,16 @@ import { useAppStore } from '../stores/appStore';
  * are explicitly out of scope for this round and tracked in the proposal.
  */
 export function ChatPanel() {
-  const [open, setOpen] = useState(false);
+  // Open by default. Users can collapse it; we remember the preference for
+  // the lifetime of this tab via sessionStorage so a refresh keeps state.
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const stored = sessionStorage.getItem('sendie.chat.open');
+      return stored === null ? true : stored === '1';
+    } catch {
+      return true;
+    }
+  });
   const [messages, setMessages] = useState<readonly ChatMessage[]>(
     () => chatService.getMessages(),
   );
@@ -21,6 +30,15 @@ export function ChatPanel() {
   const localFriendlyName = useAppStore(
     (s) => s.connection.localFriendlyName ?? 'You',
   );
+
+  // Persist the open/closed preference per tab.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('sendie.chat.open', open ? '1' : '0');
+    } catch {
+      // sessionStorage may be disabled in private browsing; fail silently.
+    }
+  }, [open]);
 
   useEffect(() => {
     chatService.on('onMessage', () => {
