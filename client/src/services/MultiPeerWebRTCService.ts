@@ -282,7 +282,32 @@ export class MultiPeerWebRTCService {
   }
 
   /**
-   * Send data to a specific peer
+   * Get the local DTLS fingerprint for a peer connection (from the local SDP).
+   * Returns null if no localDescription is set yet.
+   */
+  getLocalFingerprint(peerId: string): string | null {
+    const info = this.peerConnections.get(peerId);
+    const sdp = info?.connection.localDescription?.sdp;
+    if (!sdp) return null;
+    const m = sdp.match(/^a=fingerprint:(\S+)\s+(\S+)/m);
+    return m ? `${m[1].toLowerCase()} ${m[2].toLowerCase()}` : null;
+  }
+
+  /**
+   * Get the remote DTLS fingerprint for a peer connection (from remote SDP).
+   * Returns null if no remoteDescription is set yet.
+   */
+  getRemoteFingerprint(peerId: string): string | null {
+    const info = this.peerConnections.get(peerId);
+    const sdp = info?.connection.remoteDescription?.sdp;
+    if (!sdp) return null;
+    const m = sdp.match(/^a=fingerprint:(\S+)\s+(\S+)/m);
+    return m ? `${m[1].toLowerCase()} ${m[2].toLowerCase()}` : null;
+  }
+
+  /**
+   * Send raw bytes (or string) to a specific peer.
+   * @returns true if the data channel was open and the send was issued.
    */
   sendTo(peerId: string, data: ArrayBuffer | string): boolean {
     const peerInfo = this.peerConnections.get(peerId);

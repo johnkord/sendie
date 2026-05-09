@@ -1,0 +1,3 @@
+# Sendie session URLs are capability tokens. Don't index them.
+User-agent: *
+Disallow: /s/

@@ -44,7 +44,19 @@ public enum RateLimitPolicy
     /// <summary>
     /// ICE candidate messages: 200 per second per connection (WebRTC can generate many)
     /// </summary>
-    IceCandidate
+    IceCandidate,
+
+    /// <summary>
+    /// GET /api/sessions/{id}: 60 per minute per IP. Stops abuse of the
+    /// public lookup endpoint as a presence oracle.
+    /// </summary>
+    SessionLookup,
+
+    /// <summary>
+    /// Reports of established/closed P2P pairs from clients. Limits
+    /// abusive ReportConnectionEstablished spam used to extend session TTL.
+    /// </summary>
+    PairReport
 }
 
 /// <summary>

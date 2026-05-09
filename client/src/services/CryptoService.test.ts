@@ -93,8 +93,9 @@ describe('CryptoService', () => {
       
       expect(friendlyName).toBeDefined();
       expect(typeof friendlyName).toBe('string');
-      // Should be "adjective-noun" format
-      expect(friendlyName.split('-').length).toBe(2);
+      // Should be "adjective-adjective-noun" format (Phase 4: expanded
+      // namespace from 4096 to ~262k to reduce session collisions)
+      expect(friendlyName.split('-').length).toBe(3);
     });
 
     it('should generate consistent friendly names for same key', async () => {
@@ -107,18 +108,19 @@ describe('CryptoService', () => {
       expect(name1).toBe(name2);
     });
 
-    it('should generate names in adjective-noun format', async () => {
+    it('should generate names in adjective-adjective-noun format', async () => {
       const keyPair = await cryptoService.generateKeyPair();
       const keyJwk = await cryptoService.exportPublicKey(keyPair.publicKey);
       
       const name = await cryptoService.generateFriendlyName(keyJwk);
       const parts = name.split('-');
       
-      // Should be exactly 2 parts
-      expect(parts.length).toBe(2);
+      // Phase 4: 3 parts (adj-adj-noun)
+      expect(parts.length).toBe(3);
       // Each part should be a non-empty alphabetic word
       expect(parts[0]).toMatch(/^[a-z]+$/);
       expect(parts[1]).toMatch(/^[a-z]+$/);
+      expect(parts[2]).toMatch(/^[a-z]+$/);
     });
   });
 

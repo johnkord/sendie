@@ -102,7 +102,7 @@ export class SignalingService {
     delete this.events[event];
   }
 
-  async joinSession(sessionId: string): Promise<{ 
+  async joinSession(sessionId: string, secret?: string | null): Promise<{ 
     success: boolean; 
     isInitiator?: boolean; 
     existingPeers?: string[]; 
@@ -113,7 +113,10 @@ export class SignalingService {
     error?: string 
   }> {
     if (!this.connection) throw new Error('Not connected');
-    return await this.connection.invoke('JoinSession', sessionId);
+    // Phase 6.1 (audit C4): the join secret is required server-side. We pass
+    // null when missing so the server returns a clean error rather than
+    // throwing at the deserializer.
+    return await this.connection.invoke('JoinSession', sessionId, secret ?? null);
   }
 
   async leaveSession(): Promise<void> {
@@ -121,30 +124,9 @@ export class SignalingService {
     await this.connection.invoke('LeaveSession');
   }
 
-  async sendOffer(sdp: string): Promise<void> {
-    if (!this.connection) throw new Error('Not connected');
-    await this.connection.invoke('SendOffer', sdp);
-  }
-
-  async sendAnswer(sdp: string): Promise<void> {
-    if (!this.connection) throw new Error('Not connected');
-    await this.connection.invoke('SendAnswer', sdp);
-  }
-
-  async sendIceCandidate(candidate: string, sdpMid: string | null, sdpMLineIndex: number | null): Promise<void> {
-    if (!this.connection) throw new Error('Not connected');
-    await this.connection.invoke('SendIceCandidate', candidate, sdpMid, sdpMLineIndex);
-  }
-
-  async sendPublicKey(keyJwk: string): Promise<void> {
-    if (!this.connection) throw new Error('Not connected');
-    await this.connection.invoke('SendPublicKey', keyJwk);
-  }
-
-  async sendSignature(signature: string, challenge: string): Promise<void> {
-    if (!this.connection) throw new Error('Not connected');
-    await this.connection.invoke('SendSignature', signature, challenge);
-  }
+  // Note: targeted *To variants below are the only WebRTC signaling methods used.
+  // Broadcast variants (sendOffer/sendAnswer/sendIceCandidate/sendPublicKey) were removed
+  // because the mesh client only ever uses targeted signaling.
 
   // ============================================
   // Targeted Signaling Methods (for mesh setup)

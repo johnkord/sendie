@@ -4,17 +4,17 @@ Secure, browser-based peer-to-peer file transfer using WebRTC.
 
 ## Features
 
-- 🔒 **End-to-End Encrypted** - All transfers use DTLS encryption (built into WebRTC)
+- 🔒 **End-to-End Encrypted** - WebRTC DTLS between browsers, with SAS-code identity verification bound to the DTLS fingerprint to defend against an active man-in-the-middle
 - 👥 **Multi-Peer Sessions** - Share files with up to 10 people simultaneously
 - 🚀 **No Size Limits** - Transfer files of any size (limited only by browser/device)
 - 👤 **No Account Required to Join** - Recipients just need the session link (no login)
 - 🔐 **Allow-Listed Session Creation** - Only approved Discord accounts can create sessions
 - ⚡ **Direct P2P** - Files transfer directly between browsers, never touch a server
-- 🔐 **Identity Verification** - SAS code comparison to verify each peer
-- 👑 **Host Controls** - Session creators can lock sessions, kick peers, and restrict sending
+- 🔐 **Identity Verification** - Bound SAS code (compare 4 words out-of-band) authenticates the encrypted channel itself, not just the keys exchanged through it
+- 👑 **Host Controls** - Session creators can lock sessions, kick peers, and restrict sending (enforced on both sender and receiver)
 - 📋 **File Queue** - Queue files before anyone joins, auto-send when they connect
 - 📡 **Broadcast Mode** - Automatically send files to every new person who joins
-- 🔕 **Auto-Receive Toggle** - Recipients can disable automatic file receiving
+- ✅ **Per-File Consent** - Recipients explicitly accept each incoming file by default; auto-receive is opt-in
 - 📤 **Host-Only Sending** - Optionally restrict file sending to host only
 
 > **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files) but not anonymous (peers see each other's IPs). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work as it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for details.

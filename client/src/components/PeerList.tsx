@@ -92,7 +92,7 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, i
                     </div>
                     <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-48 p-2 bg-gray-900 rounded-lg shadow-xl border border-gray-700 z-10">
                       <p className="text-xs text-gray-300">
-                        <strong className="text-purple-300">Security code</strong>: Both of you should see this same code. If it doesn't match, don't transfer sensitive files.
+                        <strong className="text-purple-300">Security code</strong>: Both of you should see this same code. Compare out-of-band (voice, in person) before sharing sensitive files. Sendie blocks transfers if the cryptographic verification fails, but matching codes confirm there's no man-in-the-middle on the verification itself.
                       </p>
                     </div>
                   </div>

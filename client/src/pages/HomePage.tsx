@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import type { Session } from '../types';
+import type { SessionCreationResponse } from '../types';
 import { UserHeader, Footer } from '../components';
 
 /**
@@ -63,8 +63,14 @@ export default function HomePage() {
         throw new Error('Failed to create session');
       }
 
-      const session: Session = await response.json();
-      navigate(`/s/${session.id}`);
+      // Phase 6.1 (audit C4): the response now includes a one-time join
+      // secret. Stash it in the URL fragment so the page reads it the
+      // same way for hosts and joiners. Fragments never go to the server
+      // in HTTP requests, so reloads, refreshes, and bookmarks all keep
+      // the secret client-side only.
+      const session: SessionCreationResponse = await response.json();
+      const fragment = session.secret ? `#k=${session.secret}` : '';
+      navigate(`/s/${session.id}${fragment}`);
     } catch (err) {
       const rateLimit = parseRateLimitError(undefined, err instanceof Error ? err : undefined);
       if (rateLimit) {
@@ -88,12 +94,18 @@ export default function HomePage() {
 
     // Extract session ID from URL or use as-is
     let sessionId = joinSessionId.trim();
-    
-    // Handle full URL input
+    let fragment = '';
+
+    // Handle full URL input. Session IDs are URL-safe base64 (alphabet:
+    // A-Z a-z 0-9 - _) so the character class must include '-' and '_';
+    // the older [a-z0-9]+ pattern silently truncated ~50% of valid IDs.
     if (sessionId.includes('/s/')) {
-      const match = sessionId.match(/\/s\/([a-z0-9]+)/i);
+      // Parse out both the session ID and any URL fragment (#k=secret).
+      // The fragment carries the join secret added in Phase 6.1.
+      const match = sessionId.match(/\/s\/([A-Za-z0-9_-]+)(#[^\s]*)?/);
       if (match) {
         sessionId = match[1];
+        fragment = match[2] ?? '';
       }
     }
 
@@ -107,7 +119,9 @@ export default function HomePage() {
         throw new Error('Session not found');
       }
 
-      navigate(`/s/${sessionId}`);
+      // Carry forward any URL fragment the user pasted so the joining page
+      // can read the secret from window.location.hash.
+      navigate(`/s/${sessionId}${fragment}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Session not found');
       setLoading(false);

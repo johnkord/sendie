@@ -9,7 +9,10 @@ public class SessionServiceTests
 
     public SessionServiceTests()
     {
-        _sut = new SessionService();
+        // Use the test-only constructor with a deterministic pepper so we
+        // don't have to spin up Data Protection for unit tests.
+        var pepper = System.Text.Encoding.UTF8.GetBytes("sendie-tests-pepper-do-not-use-in-prod");
+        _sut = new SessionService(logger: null, testPepper: pepper);
     }
 
     #region CreateSession Tests

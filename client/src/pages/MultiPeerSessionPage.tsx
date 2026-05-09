@@ -5,7 +5,8 @@ import {
   signalingService, 
   multiPeerWebRTCService, 
   cryptoService, 
-  multiPeerFileTransferService 
+  multiPeerFileTransferService,
+  verificationService
 } from '../services';
 import { 
   FileDropZone, 
@@ -48,10 +49,43 @@ export default function MultiPeerSessionPage() {
   const initializedRef = useRef(false);
   // Track which peers have already received broadcast files
   const peersReceivedBroadcastRef = useRef<Set<string>>(new Set());
+  // Phase 6.1 (audit C4): the join secret is in the URL fragment, captured
+  // once on mount. We keep it in a ref so SessionLink can format the
+  // shareable URL consistently and so any reconnect uses the same secret.
+  const sessionSecretRef = useRef<string | null>(null);
+  if (sessionSecretRef.current === null) {
+    const hash = typeof window !== 'undefined' ? window.location.hash : '';
+    const m = hash.match(/[#&]k=([A-Za-z0-9_-]+)/);
+    sessionSecretRef.current = m ? m[1] : '';
+  }
 
-  // Set up auto-receive checker on mount
+  // Set up incoming-file accept policy on mount.
+  // Default: prompt the user per file; per-peer "accept all" is held in the service.
+  // If the user has explicitly toggled autoReceive on, files from already-known
+  // peers (status=connected) are accepted silently as a convenience.
   useEffect(() => {
-    multiPeerFileTransferService.setAutoReceiveChecker(() => useAppStore.getState().autoReceive);
+    multiPeerFileTransferService.setAcceptIncomingFile(async (peerId, fileName, fileSize, _fileType) => {
+      const { autoReceive: auto, peers: peersMap } = useAppStore.getState();
+      // Auto-receive opt-in still respected, but only for already-connected peers
+      // (i.e., not a brand-new joiner pushing a file before any human notices).
+      const peerState = peersMap.get(peerId);
+      if (auto && peerState?.status === 'connected') return true;
+      const friendly = peerState?.friendlyName ?? `Peer ${peerId.substring(0, 8)}`;
+      const sizeMb = (fileSize / 1024 / 1024).toFixed(2);
+      const accept = window.confirm(
+        `${friendly} wants to send you:\n\n` +
+        `  ${fileName} (${sizeMb} MB)\n\n` +
+        `Only accept files from peers you trust. Click OK to accept, Cancel to decline.`,
+      );
+      return accept;
+    });
+    multiPeerFileTransferService.setHostOnlySendingProviders(
+      () => useAppStore.getState().connection.isHostOnlySending,
+      () => useAppStore.getState().connection.hostConnectionId,
+    );
+    return () => {
+      multiPeerFileTransferService.resetAcceptances();
+    };
   }, []);
 
   // Initialize connection
@@ -81,7 +115,10 @@ export default function MultiPeerSessionPage() {
         signalingService.on('onOffer', handleOffer);
         signalingService.on('onAnswer', handleAnswer);
         signalingService.on('onIceCandidate', handleIceCandidate);
-        signalingService.on('onPublicKey', handlePublicKey);
+        // Note: onPublicKey is intentionally not registered. Phase 2 moved
+        // identity verification to the data channel so the SAS is bound to
+        // the DTLS endpoints — the signaling-server-mediated public key
+        // exchange would only weaken that guarantee.
         signalingService.on('onSessionLocked', handleSessionLocked);
         signalingService.on('onSessionUnlocked', handleSessionUnlocked);
         signalingService.on('onKicked', handleKicked);
@@ -94,6 +131,38 @@ export default function MultiPeerSessionPage() {
         multiPeerWebRTCService.on('onDataChannelOpen', handleDataChannelOpen);
         multiPeerWebRTCService.on('onDataChannelClose', handleDataChannelClose);
 
+        // Phase 2 verification result handler: peers transition to verified
+        // (showing the bound SAS) or failed (channel was closed by the
+        // verification service; surface the warning to the user).
+        //
+        // We also dispatch queued/broadcast files HERE rather than from the
+        // data-channel-open handler. The receiver's initializeIncomingTransfer
+        // rejects files from unverified peers, so sending on open would cause
+        // every queued/broadcast file to land as "Cancelled" until the SAS
+        // verification finished. Waiting for verified state means the receive
+        // path will accept the file-start.
+        verificationService.on('onVerificationComplete', async (result) => {
+          if (result.status !== 'verified') {
+            updatePeer(result.peerId, {
+              verification: 'failed',
+              status: 'failed',
+            });
+            console.error(`Peer ${result.peerId} verification failed: ${result.reason}`);
+            return;
+          }
+
+          const friendlyName = await cryptoService.generateFriendlyName(result.remoteJwk);
+          updatePeer(result.peerId, {
+            verification: 'verified',
+            sasCode: result.sasCode,
+            publicKeyJwk: result.remoteJwk,
+            friendlyName,
+          });
+
+          // Dispatch any queued/broadcast files to this newly-verified peer.
+          await dispatchPendingFilesToPeer(result.peerId);
+        });
+
         // Setup file transfer event handlers
         multiPeerFileTransferService.on('onTransferStart', (transfer) => addTransfer(transfer));
         multiPeerFileTransferService.on('onTransferProgress', (transfer) => 
@@ -104,7 +173,7 @@ export default function MultiPeerSessionPage() {
         );
 
         // Join the session
-        const result = await signalingService.joinSession(sessionId);
+        const result = await signalingService.joinSession(sessionId, sessionSecretRef.current);
         
         if (!result.success) {
           // Check for rate limit error
@@ -180,7 +249,6 @@ export default function MultiPeerSessionPage() {
       signalingService.off('onOffer');
       signalingService.off('onAnswer');
       signalingService.off('onIceCandidate');
-      signalingService.off('onPublicKey');
       signalingService.off('onSessionLocked');
       signalingService.off('onSessionUnlocked');
       signalingService.off('onKicked');
@@ -190,6 +258,8 @@ export default function MultiPeerSessionPage() {
       multiPeerWebRTCService.off('onPeerDisconnected');
       multiPeerWebRTCService.off('onDataChannelOpen');
       multiPeerWebRTCService.off('onDataChannelClose');
+      verificationService.off('onVerificationComplete');
+      verificationService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
       signalingService.disconnect();
@@ -224,6 +294,7 @@ export default function MultiPeerSessionPage() {
   const handlePeerLeft = useCallback((peerId: string) => {
     console.log('Peer left:', peerId);
     multiPeerWebRTCService.closePeerConnection(peerId);
+    verificationService.forget(peerId);
     removePeer(peerId);
     updateConnectionStatus();
   }, [removePeer, updateConnectionStatus]);
@@ -253,17 +324,6 @@ export default function MultiPeerSessionPage() {
     await multiPeerWebRTCService.handleIceCandidate(peerId, candidate, sdpMid, sdpMLineIndex);
   }, []);
 
-  const handlePublicKey = useCallback(async (peerId: string, keyJwk: string) => {
-    console.log('Received public key from:', peerId);
-    
-    // Generate SAS code and friendly name for this peer
-    if (localKeyJwkRef.current) {
-      const sasCode = await cryptoService.generateSAS(localKeyJwkRef.current, keyJwk);
-      const friendlyName = await cryptoService.generateFriendlyName(keyJwk);
-      updatePeer(peerId, { publicKeyJwk: keyJwk, sasCode, friendlyName });
-    }
-  }, [updatePeer]);
-
   // WebRTC Event handlers
   const handlePeerConnected = useCallback((peerId: string) => {
     console.log('Peer connected:', peerId);
@@ -274,31 +334,33 @@ export default function MultiPeerSessionPage() {
   const handlePeerDisconnected = useCallback((peerId: string) => {
     console.log('Peer disconnected:', peerId);
     updatePeer(peerId, { status: 'disconnected', dataChannelOpen: false });
+    // Tidy up any in-flight transfers to/from this peer so the UI doesn't
+    // sit on a "waiting" state forever (the per-peer send loop checks this
+    // anyway via isDataChannelOpen, but the cancellation state needs to be
+    // reflected in the transfer record so checkTransferComplete fires).
+    multiPeerFileTransferService.handlePeerDisconnected(peerId);
+    verificationService.forget(peerId);
     updateConnectionStatus();
   }, [updatePeer, updateConnectionStatus]);
 
-  const handleDataChannelOpen = useCallback(async (peerId: string) => {
-    console.log('Data channel opened with:', peerId);
-    updatePeer(peerId, { dataChannelOpen: true });
-    updateConnectionStatus();
-    
-    // Exchange public keys for verification
-    if (localKeyJwkRef.current) {
-      await signalingService.sendPublicKeyTo(peerId, localKeyJwkRef.current);
-    }
+  // Dispatch queued and broadcast files to a peer once verification has
+  // finished. Called from the verification-complete handler. Splitting this
+  // out of handleDataChannelOpen is what makes broadcast actually work:
+  // sending before verification finishes results in receiver rejection
+  // (Phase 2 enforces verified peers only on the receive path).
+  const dispatchPendingFilesToPeer = useCallback(async (peerId: string) => {
+    const { broadcastMode, clearQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } =
+      useAppStore.getState();
 
-    // Send queued files to new peer
-    const { broadcastMode, clearQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } = useAppStore.getState();
-    
-    // Check if this is the first peer to connect (for one-time queue files)
+    // Determine whether this is the first verified peer. One-time queued
+    // files only go to the first verified joiner (the historical contract).
     const otherOpenChannels = multiPeerWebRTCService.getOpenChannels().filter(id => id !== peerId);
-    const isFirstPeer = otherOpenChannels.length === 0;
+    const isFirstVerifiedPeer = otherOpenChannels.every(id => !verificationService.isVerified(id));
 
-    // Send one-time queued files only to the first peer that connects
-    if (isFirstPeer) {
+    if (isFirstVerifiedPeer) {
       const oneTimeFiles = getOneTimeQueuedFiles();
       if (oneTimeFiles.length > 0) {
-        console.log(`Sending ${oneTimeFiles.length} queued files to first peer: ${peerId}`);
+        console.log(`Sending ${oneTimeFiles.length} queued files to first verified peer: ${peerId}`);
         for (const qf of oneTimeFiles) {
           try {
             await multiPeerFileTransferService.sendFileToPeer(qf.file, peerId);
@@ -306,12 +368,12 @@ export default function MultiPeerSessionPage() {
             console.error('Failed to send queued file:', error);
           }
         }
-        // Clear one-time files after sending
         clearQueuedFiles(false);
       }
     }
 
-    // Send broadcast files to new peers (if not already sent)
+    // Send broadcast files to this newly-verified peer (idempotent: the
+    // ref tracks which peers already received the broadcast set).
     if (broadcastMode && !peersReceivedBroadcastRef.current.has(peerId)) {
       const broadcastFiles = getBroadcastFiles();
       if (broadcastFiles.length > 0) {
@@ -326,6 +388,34 @@ export default function MultiPeerSessionPage() {
         }
       }
     }
+  }, []);
+
+  const handleDataChannelOpen = useCallback(async (peerId: string) => {
+    console.log('Data channel opened with:', peerId);
+    updatePeer(peerId, { dataChannelOpen: true });
+    updateConnectionStatus();
+
+    // Phase 2: kick off bound-SAS verification immediately. File transfers are
+    // gated on verification success; if verification fails, the data channel
+    // is torn down by the verification service.
+    if (sessionId && keyPairRef.current && localKeyJwkRef.current) {
+      try {
+        await verificationService.start(
+          peerId,
+          sessionId,
+          keyPairRef.current.privateKey,
+          localKeyJwkRef.current,
+        );
+      } catch (err) {
+        console.error(`Failed to start verification with ${peerId}:`, err);
+      }
+    }
+
+    // Send queued files to new peer
+    // NOTE: actual queued/broadcast file dispatch was moved to the
+    // verification-complete handler. Sending here would arrive at the
+    // receiver before verification finished, and the receiver rejects
+    // files from unverified peers (Phase 2). See dispatchPendingFilesToPeer.
   }, [updatePeer, updateConnectionStatus]);
 
   const handleDataChannelClose = useCallback((peerId: string) => {
@@ -484,10 +574,21 @@ export default function MultiPeerSessionPage() {
 
   const connectedPeerCount = Array.from(peers.values()).filter(p => p.status === 'connected').length;
   const isConnected = connection.status === 'connected' || connection.status === 'partially-connected';
-  
+
+  // Phase 2: only allow sending when every open data channel is also verified.
+  // An unverified peer is either mid-verification or actively failing it; in
+  // either case we refuse to expose file data.
+  const allOpenChannelsVerified = Array.from(peers.values())
+    .filter((p) => p.dataChannelOpen)
+    .every((p) => p.verification === 'verified');
+
   // Can't send if host-only sending is enabled and you're not the host
   const hostOnlyRestricted = connection.isHostOnlySending && !connection.isHost;
-  const canSendFiles = isConnected && multiPeerWebRTCService.hasOpenDataChannels && !hostOnlyRestricted;
+  const canSendFiles =
+    isConnected
+    && multiPeerWebRTCService.hasOpenDataChannels
+    && allOpenChannelsVerified
+    && !hostOnlyRestricted;
   // Allow queueing files when alone in session (but not if host-only restricted)
   const canQueueFiles = !canSendFiles && peers.size === 0 && !hostOnlyRestricted;
 
@@ -625,7 +726,7 @@ export default function MultiPeerSessionPage() {
         {/* Session Link (for waiting for peers) */}
         {(connection.status === 'waiting-for-peer' || peers.size < connection.maxPeers - 1) && sessionId && !connection.isLocked && (
           <div className="mt-4">
-            <SessionLink sessionId={sessionId} />
+            <SessionLink sessionId={sessionId} sessionSecret={sessionSecretRef.current ?? ''} />
           </div>
         )}
 

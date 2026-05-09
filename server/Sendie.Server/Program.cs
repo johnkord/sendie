@@ -43,8 +43,8 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowFrontend", policy =>
     {
         policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
-              .AllowAnyHeader()
-              .AllowAnyMethod()
+              .WithHeaders("Content-Type")
+              .WithMethods("GET", "POST", "DELETE")
               .AllowCredentials();
     });
 });
@@ -60,7 +60,9 @@ builder.Services.AddAuthentication(options =>
     options.Cookie.Name = "Sendie.Auth";
     options.Cookie.HttpOnly = true;
     options.Cookie.SameSite = SameSiteMode.Lax;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // Use Always in production
+    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+        ? CookieSecurePolicy.SameAsRequest
+        : CookieSecurePolicy.Always;
     options.ExpireTimeSpan = TimeSpan.FromHours(24);
     options.SlidingExpiration = true;
 
@@ -95,7 +97,8 @@ builder.Services.AddAuthentication(options =>
     options.ClaimActions.MapJsonKey("urn:discord:global_name", "global_name");
     options.ClaimActions.MapJsonKey("urn:discord:avatar", "avatar");
 
-    options.SaveTokens = true;
+    // Tokens are not used server-side; do not persist them in the auth cookie.
+    options.SaveTokens = false;
 });
 
 // Add authorization policies
@@ -114,10 +117,56 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 
+// Phase 6.3 (audit): admin lockout safety. If no admins are configured, the
+// allow-list is unmanageable at runtime. Log a loud warning so operators
+// notice in the deploy logs rather than discovering it when they need to
+// add a user.
+using (var startupScope = app.Services.CreateScope())
+{
+    var allowList = startupScope.ServiceProvider.GetRequiredService<IAllowListService>();
+    var startupLogger = startupScope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    var admins = allowList.GetAdmins();
+    if (admins.Count == 0)
+    {
+        startupLogger.LogWarning(
+            "No admins are configured (AccessControl:Admins is empty). The allow-list " +
+            "is unmanageable at runtime. Add at least one Discord ID to AccessControl:Admins " +
+            "and redeploy.");
+    }
+    else
+    {
+        startupLogger.LogInformation(
+            "Startup admin self-test: {AdminCount} admin(s) configured.", admins.Count);
+    }
+}
+
 // Configure middleware
 // Must be first to ensure X-Forwarded-* headers are processed for OAuth redirects
 app.UseForwardedHeaders();
 app.UseCors("AllowFrontend");
+
+// Security headers on all server responses (API + hub upgrade). nginx adds
+// the same set on the static client; we duplicate here so direct port-forwards
+// or future deployments without an nginx in front are still defended.
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers["X-Content-Type-Options"] = "nosniff";
+    headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    headers["X-Frame-Options"] = "DENY";
+    headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), interest-cohort=()";
+    // Defense-in-depth CSP for API and hub responses. Anyone hitting the
+    // server directly (port-forward, no nginx) still gets a usable policy.
+    // The static client served by nginx has a fuller CSP that mirrors this.
+    headers["Content-Security-Policy"] =
+        "default-src 'self'; " +
+        "connect-src 'self'; " +
+        "frame-ancestors 'none'; " +
+        "base-uri 'none'; " +
+        "object-src 'none'";
+    await next();
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -140,9 +189,13 @@ app.MapGet("/api/auth/login", (string? returnUrl, IConfiguration config) =>
         ? "http://localhost:5173"
         : "/";
 
+    // Only accept relative paths starting with '/' that aren't protocol-relative
+    // (//evil.example or /\\evil.example are absolute when interpreted by the browser).
+    var redirect = IsSafeReturnUrl(returnUrl) ? returnUrl! : defaultRedirect;
+
     var properties = new AuthenticationProperties
     {
-        RedirectUri = returnUrl ?? defaultRedirect
+        RedirectUri = redirect
     };
     return Results.Challenge(properties, [DiscordAuthenticationDefaults.AuthenticationScheme]);
 });
@@ -182,11 +235,11 @@ app.MapGet("/api/auth/me", (HttpContext context, IAllowListService allowList) =>
 app.MapPost("/api/sessions", (ISessionService sessionService, IRateLimiterService rateLimiter, HttpContext context, int? maxPeers) =>
 {
     var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    var result = rateLimiter.IsAllowed(clientIp, RateLimitPolicy.SessionCreate);
+    var ipResult = rateLimiter.IsAllowed(clientIp, RateLimitPolicy.SessionCreate);
 
-    if (!result.IsAllowed)
+    if (!ipResult.IsAllowed)
     {
-        context.Response.Headers["Retry-After"] = ((int)Math.Ceiling(result.RetryAfter.TotalSeconds)).ToString();
+        context.Response.Headers["Retry-After"] = ((int)Math.Ceiling(ipResult.RetryAfter.TotalSeconds)).ToString();
         return Results.StatusCode(429);
     }
 
@@ -197,18 +250,52 @@ app.MapPost("/api/sessions", (ISessionService sessionService, IRateLimiterServic
         return Results.Unauthorized();
     }
 
+    // Per-user rate limit (separate bucket from per-IP) so CGNAT doesn't make
+    // one user lock out another, and a multi-IP attacker can't slip past.
+    var userResult = rateLimiter.IsAllowed($"user:{discordId}", RateLimitPolicy.SessionCreate);
+    if (!userResult.IsAllowed)
+    {
+        context.Response.Headers["Retry-After"] = ((int)Math.Ceiling(userResult.RetryAfter.TotalSeconds)).ToString();
+        return Results.StatusCode(429);
+    }
+
     var session = sessionService.CreateSession(discordId, maxPeers ?? 5);
     return Results.Ok(session);
 }).RequireAuthorization("AllowedUser");
 
-app.MapGet("/api/sessions/{id}", (string id, ISessionService sessionService) =>
+app.MapGet("/api/sessions/{id}", (string id, HttpContext ctx, ISessionService sessionService, IRateLimiterService rateLimiter) =>
 {
+    if (!IsValidSessionId(id))
+    {
+        return Results.BadRequest(new { error = "Invalid session ID" });
+    }
+
+    var clientIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var r = rateLimiter.IsAllowed(clientIp, RateLimitPolicy.SessionLookup);
+    if (!r.IsAllowed)
+    {
+        ctx.Response.Headers["Retry-After"] = ((int)Math.Ceiling(r.RetryAfter.TotalSeconds)).ToString();
+        return Results.StatusCode(429);
+    }
+
     var session = sessionService.GetSession(id);
     if (session == null)
         return Results.NotFound(new { error = "Session not found" });
 
-    return Results.Ok(session);
-}); // Public - anyone with session ID can access
+    // Phase 6.1: never leak the SecretHash. Return a stripped-down view of
+    // the session so this public probe cannot be used to attack the secret.
+    return Results.Ok(new
+    {
+        session.Id,
+        session.CreatedAt,
+        session.ExpiresAt,
+        session.AbsoluteExpiresAt,
+        session.PeerCount,
+        session.MaxPeers,
+        session.IsLocked,
+        session.IsHostOnlySending
+    });
+}); // Public - anyone with a valid session ID can probe (rate-limited).
 
 // Admin endpoints
 var adminGroup = app.MapGroup("/api/admin")
@@ -275,6 +362,28 @@ app.Run();
 static bool IsValidDiscordId(string id)
 {
     return id.Length >= 17 && id.Length <= 19 && id.All(char.IsDigit);
+}
+
+// Helper function to validate post-OAuth return URLs.
+// Only accepts paths relative to the application root and rejects protocol-relative inputs.
+static bool IsSafeReturnUrl(string? value)
+{
+    if (string.IsNullOrEmpty(value)) return false;
+    if (value.Length > 512) return false;
+    if (!value.StartsWith('/')) return false;
+    if (value.StartsWith("//") || value.StartsWith("/\\")) return false;
+    return Uri.TryCreate(value, UriKind.Relative, out _);
+}
+
+// Helper function to validate session ID format (16 random bytes -> 22-char base64url, no padding).
+static bool IsValidSessionId(string id)
+{
+    if (id.Length != 22) return false;
+    foreach (var c in id)
+    {
+        if (!(char.IsLetterOrDigit(c) || c == '-' || c == '_')) return false;
+    }
+    return true;
 }
 
 // Make the implicit Program class public for integration tests

@@ -17,9 +17,22 @@ spec:
       labels:
         app: sendie-server
     spec:
+      # Run as the non-root user baked into the image (uid 1001).
+      # fsGroup ensures the mounted PVC at /app/data is group-writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       containers:
         - name: sendie-server
           image: ${ACR_LOGIN_SERVER}/sendie-server:${IMAGE_TAG}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8080
           envFrom:

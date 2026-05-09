@@ -73,6 +73,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         publicKeyJwk: null,
         sasCode: null,
         friendlyName: null,
+        verification: 'pending',
+        fingerprint: null,
         ...initialState,
       });
       return { peers: newPeers };
@@ -113,7 +115,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   // File queue state management
   queuedFiles: [],
   broadcastMode: false,
-  autoReceive: true,
+  // Default OFF: receivers must explicitly accept incoming files. Prevents
+  // anyone with a session URL from silently dropping files into recipients'
+  // Downloads folders. The user can opt back into auto-receive per session.
+  autoReceive: false,
 
   addQueuedFile: (file: File) =>
     set((state) => ({
@@ -122,6 +127,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         {
           id: crypto.randomUUID(),
           file,
+          // isBroadcast is captured for compatibility but the send path
+          // re-evaluates against the current broadcastMode at send time
+          // (see getOneTimeQueuedFiles / getBroadcastFiles).
           isBroadcast: state.broadcastMode,
           addedAt: Date.now(),
         },
@@ -142,6 +150,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setBroadcastMode: (enabled: boolean) =>
     set({ broadcastMode: enabled }),
+    // Note: queued files keep their original `isBroadcast` flag. The page
+    // gates broadcast-style fan-out on the *current* broadcastMode, so
+    // toggling off does not leak files to new joiners; they sit in the
+    // queue (visible in the UI) until the user re-enables broadcast or
+    // clears them. The earlier audit claim of a silent leak here was wrong.
 
   setAutoReceive: (enabled: boolean) =>
     set({ autoReceive: enabled }),

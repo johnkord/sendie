@@ -14,8 +14,16 @@ RUN dotnet publish -c Release -o /app/publish
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
-# Copy published output
-COPY --from=build /app/publish .
+# Create non-root user and pre-create the data dirs that Data Protection /
+# AllowListService write into. data/keys is locked down to the appuser.
+RUN adduser --disabled-password --gecos '' --uid 1001 appuser \
+ && mkdir -p /app/data/keys \
+ && chown -R appuser:appuser /app \
+ && chmod 700 /app/data/keys
+USER appuser
+
+# Copy published output owned by the runtime user
+COPY --from=build --chown=appuser:appuser /app/publish .
 
 # Expose port
 EXPOSE 8080

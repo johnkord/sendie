@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.DataProtection;
 using Sendie.Server.Models;
 
 namespace Sendie.Server.Services;
@@ -9,8 +11,16 @@ public class SessionService : ISessionService
     private readonly ConcurrentDictionary<string, Session> _sessions = new();
     private readonly ConcurrentDictionary<string, List<Peer>> _sessionPeers = new();
     private readonly ConcurrentDictionary<string, string> _connectionToUserId = new();  // ConnectionId -> UserId mapping
+    // Per-session set of canonicalized connection-pair tuples. Using
+    // ConcurrentDictionary as a set so concurrent writers cannot corrupt
+    // internal state (HashSet is not thread-safe).
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<(string A, string B), byte>> _pairs = new();
     private readonly Timer _cleanupTimer;
     private readonly ILogger<SessionService>? _logger;
+    // Phase 6.1 (audit C4): pepper used to HMAC join secrets before storing
+    // them. Derived once at startup from a Data Protection secret so it
+    // survives restart but is never written to user-managed config.
+    private readonly byte[] _secretPepper;
 
     // Session TTL configuration
     private readonly TimeSpan _baseTtl = TimeSpan.FromMinutes(30);
@@ -19,22 +29,43 @@ public class SessionService : ISessionService
     private readonly TimeSpan _hostGracePeriod = TimeSpan.FromMinutes(30);              // Grace period after host disconnects
     private readonly TimeSpan _emptyTimeout = TimeSpan.FromMinutes(5);
 
-    public SessionService(ILogger<SessionService>? logger = null)
+    public SessionService(IDataProtectionProvider dataProtection, ILogger<SessionService>? logger = null)
     {
         _logger = logger;
+        // Derive a pepper from Data Protection. Protect/Unprotect is keyed
+        // off the persisted Data Protection keyring, so the same pepper
+        // is recovered across restarts without us managing a separate secret.
+        var protector = dataProtection.CreateProtector("Sendie.SessionSecretPepper.v1");
+        var seed = Encoding.UTF8.GetBytes("sendie/session-secret-pepper/v1");
+        _secretPepper = protector.Protect(seed);
         // Cleanup expired sessions every minute (more frequent for empty session cleanup)
+        _cleanupTimer = new Timer(CleanupExpiredSessions, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+    }
+
+    // Test-friendly constructor: deterministic pepper provided by the test
+    // so we don't have to wire Data Protection into unit tests. Public so
+    // the test project (no InternalsVisibleTo on this assembly) can reach it.
+    // Do not call from production code; the DI-friendly ctor above does.
+    public SessionService(ILogger<SessionService>? logger, byte[] testPepper)
+    {
+        _logger = logger;
+        _secretPepper = testPepper;
         _cleanupTimer = new Timer(CleanupExpiredSessions, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     public const int DefaultMaxPeers = 10;
     public const int AbsoluteMaxPeers = 10;
 
-    public Session CreateSession(string creatorUserId, int maxPeers = DefaultMaxPeers)
+    public SessionCreationResponse CreateSession(string creatorUserId, int maxPeers = DefaultMaxPeers)
     {
         // Clamp maxPeers to valid range
         maxPeers = Math.Clamp(maxPeers, 2, AbsoluteMaxPeers);
 
         var id = GenerateSessionId();
+        // 16 random bytes (128 bits) of secret material. URL-safe base64,
+        // exactly 22 chars after stripping padding — same shape as the ID.
+        var secret = GenerateUrlSafeRandom(16);
+        var secretHash = ComputeSecretHash(id, secret);
         var now = DateTime.UtcNow;
 
         // Session starts with host-disconnected TTL; will extend to 24h when host joins
@@ -47,7 +78,8 @@ public class SessionService : ISessionService
             IsLocked: false,
             CreatorUserId: creatorUserId,  // Set at creation time from authenticated user
             IsHostConnected: false,
-            HostLastSeen: null
+            HostLastSeen: null,
+            SecretHash: secretHash
         );
 
         _sessions[id] = session;
@@ -56,7 +88,51 @@ public class SessionService : ISessionService
         _logger?.LogInformation("Session {SessionId} created by user {UserId}, initial absolute max: {MaxTtl}h",
             id, creatorUserId, _absoluteMaxTtlHostDisconnected.TotalHours);
 
-        return session;
+        return new SessionCreationResponse(
+            Id: id,
+            Secret: secret,
+            CreatedAt: session.CreatedAt,
+            ExpiresAt: session.ExpiresAt,
+            AbsoluteExpiresAt: session.AbsoluteExpiresAt,
+            MaxPeers: session.MaxPeers,
+            PeerCount: 0,
+            IsLocked: session.IsLocked,
+            IsHostOnlySending: session.IsHostOnlySending);
+    }
+
+    public bool ValidateSecret(string sessionId, string? candidateSecret)
+    {
+        if (string.IsNullOrEmpty(candidateSecret)) return false;
+        if (!_sessions.TryGetValue(sessionId, out var session)) return false;
+        if (string.IsNullOrEmpty(session.SecretHash)) return false;
+
+        var expected = Convert.FromBase64String(session.SecretHash);
+        var actual = ComputeSecretHashBytes(sessionId, candidateSecret);
+        return CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+
+    private string ComputeSecretHash(string sessionId, string secret)
+    {
+        return Convert.ToBase64String(ComputeSecretHashBytes(sessionId, secret));
+    }
+
+    private byte[] ComputeSecretHashBytes(string sessionId, string secret)
+    {
+        // HMAC-SHA256 keyed on the pepper, message = sessionId || "|" || secret.
+        // Including the session ID prevents a hash collision across sessions
+        // from being exploitable as a cross-session secret.
+        using var hmac = new HMACSHA256(_secretPepper);
+        var data = Encoding.UTF8.GetBytes(sessionId + "|" + secret);
+        return hmac.ComputeHash(data);
+    }
+
+    private static string GenerateUrlSafeRandom(int byteCount)
+    {
+        var bytes = RandomNumberGenerator.GetBytes(byteCount);
+        return Convert.ToBase64String(bytes)
+            .Replace("+", "-")
+            .Replace("/", "_")
+            .TrimEnd('=');
     }
 
     public Session? GetSession(string id)
@@ -193,20 +269,23 @@ public class SessionService : ISessionService
             _sessionPeers[sessionId] = peers;
         }
 
-        // Check against session's max peers limit
-        if (peers.Count >= session.MaxPeers)
-            return null;
-
-        var isInitiator = peers.Count == 0;
-
-        // Check if session is locked (only applies to non-initiators)
-        if (!isInitiator && session.IsLocked)
-            return null;
-
-        var peer = new Peer(connectionId, sessionId, isInitiator);
-
+        Peer peer;
+        // Take the lock for the entire check+insert. Pre-lock checks would
+        // race with concurrent joins (allowing MaxPeers+N) and concurrent
+        // LockSession calls (slipping a peer through during a lock).
         lock (peers)
         {
+            if (peers.Count >= session.MaxPeers)
+                return null;
+
+            // Re-read session to get freshest IsLocked under the lock; the
+            // ConcurrentDictionary read is atomic but we still want it after
+            // we hold the per-session insert lock to avoid TOCTOU.
+            if (!_sessions.TryGetValue(sessionId, out var fresh)) return null;
+            var isInitiator = peers.Count == 0;
+            if (!isInitiator && fresh.IsLocked) return null;
+
+            peer = new Peer(connectionId, sessionId, isInitiator);
             peers.Add(peer);
         }
 
@@ -227,6 +306,9 @@ public class SessionService : ISessionService
     {
         // Clean up user ID mapping
         _connectionToUserId.TryRemove(connectionId, out _);
+
+        // Forget any pair entries that involved this connection.
+        ForgetConnection(sessionId, connectionId);
 
         if (_sessionPeers.TryGetValue(sessionId, out var peers))
         {
@@ -342,37 +424,69 @@ public class SessionService : ISessionService
         }
     }
 
-    public void IncrementConnectedPairs(string sessionId)
+    public void RecordPair(string sessionId, string connectionA, string connectionB)
     {
-        if (_sessions.TryGetValue(sessionId, out var session))
-        {
-            _sessions[sessionId] = session with
-            {
-                ConnectedPeerPairs = session.ConnectedPeerPairs + 1,
-                EmptySince = null // Clear empty flag when connections are active
-            };
+        if (string.IsNullOrEmpty(connectionA) || string.IsNullOrEmpty(connectionB)) return;
+        if (connectionA == connectionB) return;
+        if (!_sessions.ContainsKey(sessionId)) return;
 
-            // Also extend TTL when P2P connection is established
+        var canonical = string.CompareOrdinal(connectionA, connectionB) <= 0
+            ? (connectionA, connectionB)
+            : (connectionB, connectionA);
+        var bucket = _pairs.GetOrAdd(sessionId, _ => new ConcurrentDictionary<(string A, string B), byte>());
+        var added = bucket.TryAdd(canonical, 0);
+
+        // Refresh the count exposed on the Session record.
+        SyncPairCount(sessionId);
+
+        if (added)
+        {
             ExtendSession(sessionId);
         }
     }
 
-    public void DecrementConnectedPairs(string sessionId)
+    public void ForgetPair(string sessionId, string connectionA, string connectionB)
     {
-        if (_sessions.TryGetValue(sessionId, out var session))
+        if (!_pairs.TryGetValue(sessionId, out var bucket)) return;
+        var canonical = string.CompareOrdinal(connectionA, connectionB) <= 0
+            ? (connectionA, connectionB)
+            : (connectionB, connectionA);
+        bucket.TryRemove(canonical, out _);
+        SyncPairCount(sessionId);
+    }
+
+    public void ForgetConnection(string sessionId, string connectionId)
+    {
+        if (!_pairs.TryGetValue(sessionId, out var bucket)) return;
+        foreach (var key in bucket.Keys)
         {
-            var newCount = Math.Max(0, session.ConnectedPeerPairs - 1);
-            _sessions[sessionId] = session with
+            if (key.A == connectionId || key.B == connectionId)
             {
-                ConnectedPeerPairs = newCount
-            };
+                bucket.TryRemove(key, out _);
+            }
         }
+        SyncPairCount(sessionId);
+    }
+
+    private void SyncPairCount(string sessionId)
+    {
+        var count = _pairs.TryGetValue(sessionId, out var bucket) ? bucket.Count : 0;
+        // Only update if the session still exists. AddOrUpdate would resurrect
+        // a deleted session record with a null value, which then surfaces as
+        // a NullReferenceException in callers reading session fields.
+        if (!_sessions.TryGetValue(sessionId, out var existing)) return;
+        var updated = existing with { ConnectedPeerPairs = count };
+        _sessions.TryUpdate(sessionId, updated, existing);
+        // If TryUpdate fails because the value changed, the next read of
+        // _sessions will pick up the latest version which will be re-synced
+        // by the next Record/Forget call. Acceptable convergence for a count.
     }
 
     private void RemoveSession(string id)
     {
         _sessions.TryRemove(id, out _);
         _sessionPeers.TryRemove(id, out _);
+        _pairs.TryRemove(id, out _);
     }
 
     private void CleanupExpiredSessions(object? state)
@@ -439,15 +553,15 @@ public class SessionService : ISessionService
         if (string.IsNullOrEmpty(userId))
             return false;
 
-        if (!_sessions.TryGetValue(sessionId, out var session))
-            return false;
-
-        // Only the creator can lock the session
-        if (session.CreatorUserId != userId)
-            return false;
-
-        _sessions[sessionId] = session with { IsLocked = true };
-        return true;
+        // Atomic compare-and-set so concurrent admin actions cannot lose updates.
+        while (_sessions.TryGetValue(sessionId, out var session))
+        {
+            if (session.CreatorUserId != userId) return false;
+            if (session.IsLocked) return true;
+            var updated = session with { IsLocked = true };
+            if (_sessions.TryUpdate(sessionId, updated, session)) return true;
+        }
+        return false;
     }
 
     public bool UnlockSession(string sessionId, string? userId)
@@ -455,15 +569,14 @@ public class SessionService : ISessionService
         if (string.IsNullOrEmpty(userId))
             return false;
 
-        if (!_sessions.TryGetValue(sessionId, out var session))
-            return false;
-
-        // Only the creator can unlock the session
-        if (session.CreatorUserId != userId)
-            return false;
-
-        _sessions[sessionId] = session with { IsLocked = false };
-        return true;
+        while (_sessions.TryGetValue(sessionId, out var session))
+        {
+            if (session.CreatorUserId != userId) return false;
+            if (!session.IsLocked) return true;
+            var updated = session with { IsLocked = false };
+            if (_sessions.TryUpdate(sessionId, updated, session)) return true;
+        }
+        return false;
     }
 
     public bool IsSessionLocked(string sessionId)
@@ -520,15 +633,14 @@ public class SessionService : ISessionService
         if (string.IsNullOrEmpty(userId))
             return false;
 
-        if (!_sessions.TryGetValue(sessionId, out var session))
-            return false;
-
-        // Only the creator can enable host-only sending
-        if (session.CreatorUserId != userId)
-            return false;
-
-        _sessions[sessionId] = session with { IsHostOnlySending = true };
-        return true;
+        while (_sessions.TryGetValue(sessionId, out var session))
+        {
+            if (session.CreatorUserId != userId) return false;
+            if (session.IsHostOnlySending) return true;
+            var updated = session with { IsHostOnlySending = true };
+            if (_sessions.TryUpdate(sessionId, updated, session)) return true;
+        }
+        return false;
     }
 
     public bool DisableHostOnlySending(string sessionId, string? userId)
@@ -536,15 +648,14 @@ public class SessionService : ISessionService
         if (string.IsNullOrEmpty(userId))
             return false;
 
-        if (!_sessions.TryGetValue(sessionId, out var session))
-            return false;
-
-        // Only the creator can disable host-only sending
-        if (session.CreatorUserId != userId)
-            return false;
-
-        _sessions[sessionId] = session with { IsHostOnlySending = false };
-        return true;
+        while (_sessions.TryGetValue(sessionId, out var session))
+        {
+            if (session.CreatorUserId != userId) return false;
+            if (!session.IsHostOnlySending) return true;
+            var updated = session with { IsHostOnlySending = false };
+            if (_sessions.TryUpdate(sessionId, updated, session)) return true;
+        }
+        return false;
     }
 
     public bool IsHostOnlySending(string sessionId)

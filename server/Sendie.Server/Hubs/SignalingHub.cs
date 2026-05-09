@@ -64,6 +64,19 @@ public class SignalingHub : Hub
         }
     }
 
+    /// <summary>
+    /// Validates the format of a session ID (16 random bytes -> 22-char base64url).
+    /// </summary>
+    private static bool IsValidSessionIdFormat(string id)
+    {
+        if (string.IsNullOrEmpty(id) || id.Length != 22) return false;
+        foreach (var c in id)
+        {
+            if (!(char.IsLetterOrDigit(c) || c == '-' || c == '_')) return false;
+        }
+        return true;
+    }
+
     public override async Task OnConnectedAsync()
     {
         var discordId = GetDiscordId();
@@ -99,10 +112,25 @@ public class SignalingHub : Hub
         await base.OnDisconnectedAsync(exception);
     }
 
-    public async Task<object> JoinSession(string sessionId)
+    public async Task<object> JoinSession(string sessionId, string? secret = null)
     {
+        // Reject malformed IDs early to prevent dictionary churn from junk input.
+        if (!IsValidSessionIdFormat(sessionId))
+        {
+            return new { success = false, error = "Invalid session ID" };
+        }
+
         // Rate limit by IP for join attempts (prevents session enumeration)
         CheckRateLimit(RateLimitPolicy.SessionJoin, GetClientIp());
+
+        // Phase 6.1 (audit C4): require the URL-fragment join secret. The
+        // path-only session URL is no longer sufficient to authenticate;
+        // the secret travels in the fragment and is sent here over WSS.
+        if (!_sessionService.ValidateSecret(sessionId, secret))
+        {
+            _logger.LogWarning("Failed to join session {SessionId}: invalid join secret", sessionId);
+            return new { success = false, error = "Invalid or missing join secret" };
+        }
 
         // Check if session is locked before attempting to join
         if (_sessionService.IsSessionLocked(sessionId))
@@ -177,57 +205,15 @@ public class SignalingHub : Hub
     }
 
     // WebRTC Signaling Methods
-    public async Task SendOffer(string sdp)
-    {
-        CheckRateLimit(RateLimitPolicy.SignalingMessage);
-
-        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
-        if (peer != null)
-        {
-            _logger.LogDebug("Sending offer from {ConnectionId} to session {SessionId}",
-                Context.ConnectionId, peer.SessionId);
-            await Clients.OthersInGroup(peer.SessionId).SendAsync("OnOffer", Context.ConnectionId, sdp);
-        }
-    }
-
-    public async Task SendAnswer(string sdp)
-    {
-        CheckRateLimit(RateLimitPolicy.SignalingMessage);
-
-        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
-        if (peer != null)
-        {
-            _logger.LogDebug("Sending answer from {ConnectionId} to session {SessionId}",
-                Context.ConnectionId, peer.SessionId);
-            await Clients.OthersInGroup(peer.SessionId).SendAsync("OnAnswer", Context.ConnectionId, sdp);
-        }
-    }
-
-    public async Task SendIceCandidate(string candidate, string? sdpMid, int? sdpMLineIndex)
-    {
-        CheckRateLimit(RateLimitPolicy.IceCandidate);
-
-        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
-        if (peer != null)
-        {
-            await Clients.OthersInGroup(peer.SessionId).SendAsync("OnIceCandidate",
-                Context.ConnectionId, candidate, sdpMid, sdpMLineIndex);
-        }
-    }
+    // Note: only targeted *To variants are used by the mesh client.
+    // Broadcast variants were removed to reduce attack surface.
 
     // Identity Verification Methods
-    public async Task SendPublicKey(string keyJwk)
-    {
-        CheckRateLimit(RateLimitPolicy.SignalingMessage);
-
-        var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
-        if (peer != null)
-        {
-            _logger.LogDebug("Sending public key from {ConnectionId}", Context.ConnectionId);
-            await Clients.OthersInGroup(peer.SessionId).SendAsync("OnPublicKey", Context.ConnectionId, keyJwk);
-        }
-    }
-
+    // SendSignature/OnSignature is wired through the signaling server but
+    // is unused by Phase 2's bound-SAS verification (which runs over the
+    // data channel). It is intentionally retained because the protocol may
+    // grow a server-mediated handshake in the future; remove if that need
+    // never materializes.
     public async Task SendSignature(string signature, string challenge)
     {
         CheckRateLimit(RateLimitPolicy.SignalingMessage);
@@ -335,6 +321,11 @@ public class SignalingHub : Hub
         }
     }
 
+    // Note: the legacy SendSignature/OnSignature pathway via the signaling
+    // server is intentionally not present. Phase 2 verification runs over the
+    // P2P data channel so a malicious server cannot forge signatures — the
+    // server never sees the verification payload.
+
     // ============================================
     // Connection State Tracking (for TTL management)
     // ============================================
@@ -345,6 +336,8 @@ public class SignalingHub : Hub
     /// </summary>
     public Task ReportConnectionEstablished(string targetPeerId)
     {
+        CheckRateLimit(RateLimitPolicy.PairReport);
+
         var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
         if (peer != null)
         {
@@ -352,7 +345,7 @@ public class SignalingHub : Hub
             var targetPeer = _sessionService.GetPeerByConnectionId(targetPeerId);
             if (targetPeer != null && targetPeer.SessionId == peer.SessionId)
             {
-                _sessionService.IncrementConnectedPairs(peer.SessionId);
+                _sessionService.RecordPair(peer.SessionId, Context.ConnectionId, targetPeerId);
                 _logger.LogInformation(
                     "P2P connection established in session {SessionId}: {PeerId} <-> {TargetPeerId}",
                     peer.SessionId, Context.ConnectionId, targetPeerId);
@@ -366,10 +359,12 @@ public class SignalingHub : Hub
     /// </summary>
     public Task ReportConnectionClosed(string targetPeerId)
     {
+        CheckRateLimit(RateLimitPolicy.PairReport);
+
         var peer = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
         if (peer != null)
         {
-            _sessionService.DecrementConnectedPairs(peer.SessionId);
+            _sessionService.ForgetPair(peer.SessionId, Context.ConnectionId, targetPeerId);
             _logger.LogInformation(
                 "P2P connection closed in session {SessionId}: {PeerId} <-> {TargetPeerId}",
                 peer.SessionId, Context.ConnectionId, targetPeerId);

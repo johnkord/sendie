@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "vendor:streamsaver": "node -e \"const fs=require('fs'); fs.mkdirSync('public/streamsaver',{recursive:true}); for (const f of ['mitm.html','sw.js']) fs.copyFileSync('node_modules/streamsaver/'+f,'public/streamsaver/'+f);\"",
+    "postinstall": "npm run vendor:streamsaver"
   },
   "dependencies": {
     "@microsoft/signalr": "^8.0.0",
@@ -25,6 +27,7 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.0.1",
     "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^25.6.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/streamsaver": "^2.0.5",

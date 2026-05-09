@@ -52,9 +52,12 @@ public class SignalingHubTests
     public async Task JoinSession_WithValidSession_ShouldReturnSuccess()
     {
         // Arrange
-        var sessionId = "test-session";
+        var sessionId = "abcdefghijklmnopqrstuv"; // 22 chars, base64url-shaped
         var peer = new Peer("test-connection-id", sessionId, true);
 
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>()))
+            .Returns(true);
         _sessionServiceMock
             .Setup(s => s.AddPeerToSession(sessionId, "test-connection-id", It.IsAny<string?>()))
             .Returns(peer);
@@ -64,7 +67,7 @@ public class SignalingHubTests
             .Returns(new List<Peer> { peer });
 
         // Act
-        var result = await _hub.JoinSession(sessionId);
+        var result = await _hub.JoinSession(sessionId, "correct-secret");
 
         // Assert
         var successProp = result.GetType().GetProperty("success");
@@ -80,14 +83,17 @@ public class SignalingHubTests
     public async Task JoinSession_WithInvalidSession_ShouldReturnError()
     {
         // Arrange
-        var sessionId = "invalid-session";
+        var sessionId = "abcdefghijklmnopqrstuv"; // valid format, just not in the service
 
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>()))
+            .Returns(true);
         _sessionServiceMock
             .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns((Peer?)null);
 
         // Act
-        var result = await _hub.JoinSession(sessionId);
+        var result = await _hub.JoinSession(sessionId, "any-secret");
 
         // Assert
         var successProp = result.GetType().GetProperty("success");
@@ -96,12 +102,35 @@ public class SignalingHubTests
     }
 
     [Fact]
+    public async Task JoinSession_WithInvalidSecret_ShouldReturnError()
+    {
+        // Phase 6.1 (audit C4): the URL-fragment join secret is required.
+        // A valid session ID without the matching secret must be rejected.
+        var sessionId = "abcdefghijklmnopqrstuv";
+
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>()))
+            .Returns(false);
+
+        var result = await _hub.JoinSession(sessionId, "wrong-secret");
+        var successProp = result.GetType().GetProperty("success");
+        ((bool)successProp!.GetValue(result)!).Should().BeFalse();
+        // Should not even attempt to add the peer when the secret is wrong.
+        _sessionServiceMock.Verify(
+            s => s.AddPeerToSession(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()),
+            Times.Never);
+    }
+
+    [Fact]
     public async Task JoinSession_ShouldAddToGroup()
     {
         // Arrange
-        var sessionId = "test-session";
+        var sessionId = "abcdefghijklmnopqrstuv";
         var peer = new Peer("test-connection-id", sessionId, true);
 
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>()))
+            .Returns(true);
         _sessionServiceMock
             .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(peer);
@@ -111,7 +140,7 @@ public class SignalingHubTests
             .Returns(new List<Peer> { peer });
 
         // Act
-        await _hub.JoinSession(sessionId);
+        await _hub.JoinSession(sessionId, "secret");
 
         // Assert
         _groupsMock.Verify(
@@ -123,9 +152,12 @@ public class SignalingHubTests
     public async Task JoinSession_ShouldNotifyOtherPeers()
     {
         // Arrange
-        var sessionId = "test-session";
+        var sessionId = "abcdefghijklmnopqrstuv";
         var peer = new Peer("test-connection-id", sessionId, false);
 
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>()))
+            .Returns(true);
         _sessionServiceMock
             .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(peer);
@@ -135,7 +167,7 @@ public class SignalingHubTests
             .Returns(new List<Peer> { peer });
 
         // Act
-        await _hub.JoinSession(sessionId);
+        await _hub.JoinSession(sessionId, "secret");
 
         // Assert
         _othersProxyMock.Verify(
@@ -210,132 +242,9 @@ public class SignalingHubTests
 
     #endregion
 
-    #region SendOffer Tests
-
-    [Fact]
-    public async Task SendOffer_WithValidPeer_ShouldBroadcastToGroup()
-    {
-        // Arrange
-        var peer = new Peer("test-connection-id", "test-session", true);
-        var sdp = "test-sdp-offer";
-
-        _sessionServiceMock
-            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
-            .Returns(peer);
-
-        // Act
-        await _hub.SendOffer(sdp);
-
-        // Assert
-        _othersProxyMock.Verify(
-            p => p.SendCoreAsync("OnOffer",
-                It.Is<object[]>(o => o[0].ToString() == "test-connection-id" && o[1].ToString() == sdp),
-                default),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task SendOffer_WithNoPeer_ShouldNotBroadcast()
-    {
-        // Arrange
-        _sessionServiceMock
-            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
-            .Returns((Peer?)null);
-
-        // Act
-        await _hub.SendOffer("test-sdp");
-
-        // Assert
-        _othersProxyMock.Verify(
-            p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object[]>(), default),
-            Times.Never);
-    }
-
-    #endregion
-
-    #region SendAnswer Tests
-
-    [Fact]
-    public async Task SendAnswer_WithValidPeer_ShouldBroadcastToGroup()
-    {
-        // Arrange
-        var peer = new Peer("test-connection-id", "test-session", false);
-        var sdp = "test-sdp-answer";
-
-        _sessionServiceMock
-            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
-            .Returns(peer);
-
-        // Act
-        await _hub.SendAnswer(sdp);
-
-        // Assert
-        _othersProxyMock.Verify(
-            p => p.SendCoreAsync("OnAnswer",
-                It.Is<object[]>(o => o[0].ToString() == "test-connection-id" && o[1].ToString() == sdp),
-                default),
-            Times.Once);
-    }
-
-    #endregion
-
-    #region SendIceCandidate Tests
-
-    [Fact]
-    public async Task SendIceCandidate_WithValidPeer_ShouldBroadcastToGroup()
-    {
-        // Arrange
-        var peer = new Peer("test-connection-id", "test-session", true);
-        var candidate = "test-candidate";
-        var sdpMid = "0";
-        var sdpMLineIndex = 0;
-
-        _sessionServiceMock
-            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
-            .Returns(peer);
-
-        // Act
-        await _hub.SendIceCandidate(candidate, sdpMid, sdpMLineIndex);
-
-        // Assert
-        _othersProxyMock.Verify(
-            p => p.SendCoreAsync("OnIceCandidate",
-                It.Is<object[]>(o =>
-                    o[0].ToString() == "test-connection-id" &&
-                    o[1].ToString() == candidate &&
-                    o[2].ToString() == sdpMid &&
-                    (int)o[3] == sdpMLineIndex),
-                default),
-            Times.Once);
-    }
-
-    #endregion
-
-    #region SendPublicKey Tests
-
-    [Fact]
-    public async Task SendPublicKey_WithValidPeer_ShouldBroadcastToGroup()
-    {
-        // Arrange
-        var peer = new Peer("test-connection-id", "test-session", true);
-        var keyJwk = "{\"kty\":\"EC\",\"crv\":\"P-256\"}";
-
-        _sessionServiceMock
-            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
-            .Returns(peer);
-
-        // Act
-        await _hub.SendPublicKey(keyJwk);
-
-        // Assert
-        _othersProxyMock.Verify(
-            p => p.SendCoreAsync("OnPublicKey",
-                It.Is<object[]>(o => o[0].ToString() == "test-connection-id" && o[1].ToString() == keyJwk),
-                default),
-            Times.Once);
-    }
-
-    #endregion
+    // Note: tests for the broadcast variants SendOffer/SendAnswer/SendIceCandidate/SendPublicKey
+    // were removed in the security audit Phase 0 cleanup. Those hub methods were never used by
+    // the mesh client; only the targeted *To variants are kept and exercised by integration tests.
 
     #region SendSignature Tests
 

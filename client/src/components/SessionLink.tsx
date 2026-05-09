@@ -2,12 +2,22 @@ import { useState, useCallback } from 'react';
 
 interface SessionLinkProps {
   sessionId: string;
+  // The 128-bit join secret returned by POST /api/sessions, base64url-encoded.
+  // Carried in the URL fragment (#k=...) so it never reaches the server in
+  // the initial GET. Required: a session URL without the secret cannot join.
+  sessionSecret: string;
 }
 
-export function SessionLink({ sessionId }: SessionLinkProps) {
+export function SessionLink({ sessionId, sessionSecret }: SessionLinkProps) {
   const [copied, setCopied] = useState(false);
-  
-  const shareUrl = `${window.location.origin}/s/${sessionId}`;
+
+  // The secret rides in the URL fragment so:
+  //   1. Browsers do not send fragments in the HTTP request line.
+  //   2. Server access logs and proxy logs never see the secret.
+  //   3. URL-preview bots (Discord, Slack, etc.) that fetch the link see
+  //      only the public ID, not the secret, so they cannot enumerate
+  //      session contents.
+  const shareUrl = `${window.location.origin}/s/${sessionId}#k=${sessionSecret}`;
 
   const handleCopy = useCallback(async () => {
     try {

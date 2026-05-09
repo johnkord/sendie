@@ -95,19 +95,24 @@ public class AllowListService : IAllowListService
     {
         try
         {
-            // Only persist non-config users (runtime additions)
-            var usersToPersist = _allowedUsers.Values
-                .Where(u => u.AddedByAdminId != "config")
-                .Select(u => new PersistedUser(u.DiscordUserId, u.AddedAt, u.AddedByAdminId))
-                .ToList();
-
             lock (_fileLock)
             {
-                var json = JsonSerializer.Serialize(usersToPersist, _jsonOptions);
-                File.WriteAllText(_persistencePath, json);
-            }
+                // Snapshot under the lock so a concurrent AddUser/RemoveUser
+                // cannot interleave between snapshot and write.
+                var usersToPersist = _allowedUsers.Values
+                    .Where(u => u.AddedByAdminId != "config")
+                    .Select(u => new PersistedUser(u.DiscordUserId, u.AddedAt, u.AddedByAdminId))
+                    .ToList();
 
-            _logger.LogDebug("Persisted {Count} users to {Path}", usersToPersist.Count, _persistencePath);
+                var json = JsonSerializer.Serialize(usersToPersist, _jsonOptions);
+                // Write to a temp path and atomically move into place so a
+                // crash mid-write cannot leave a truncated allow-list file.
+                var tmpPath = _persistencePath + ".tmp";
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, _persistencePath, overwrite: true);
+
+                _logger.LogDebug("Persisted {Count} users to {Path}", usersToPersist.Count, _persistencePath);
+            }
         }
         catch (Exception ex)
         {

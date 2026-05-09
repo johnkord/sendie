@@ -18,7 +18,9 @@ public class RateLimiterService : IRateLimiterService, IDisposable
         [RateLimitPolicy.SessionCreate] = (10, TimeSpan.FromHours(1)),
         [RateLimitPolicy.SessionJoin] = (30, TimeSpan.FromMinutes(1)),
         [RateLimitPolicy.SignalingMessage] = (100, TimeSpan.FromSeconds(1)),
-        [RateLimitPolicy.IceCandidate] = (200, TimeSpan.FromSeconds(1))
+        [RateLimitPolicy.IceCandidate] = (200, TimeSpan.FromSeconds(1)),
+        [RateLimitPolicy.SessionLookup] = (60, TimeSpan.FromMinutes(1)),
+        [RateLimitPolicy.PairReport] = (50, TimeSpan.FromMinutes(1))
     };
 
     public RateLimiterService(ILogger<RateLimiterService> logger)

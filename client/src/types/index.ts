@@ -7,8 +7,20 @@ export interface Session {
   maxPeers: number;
 }
 
+// Phase 6.1: response shape from POST /api/sessions. The plaintext join
+// secret is delivered exactly once, in the URL fragment, and never persisted
+// on the server (only a peppered HMAC of it).
+export interface SessionCreationResponse extends Session {
+  secret: string;
+  absoluteExpiresAt: string;
+  isLocked: boolean;
+  isHostOnlySending: boolean;
+}
+
 // Per-peer connection state (for multi-peer mesh)
 export type PeerConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'failed';
+
+export type PeerVerificationStatus = 'pending' | 'verified' | 'failed';
 
 export interface PeerConnectionState {
   peerId: string;
@@ -17,6 +29,8 @@ export interface PeerConnectionState {
   publicKeyJwk: string | null;
   sasCode: string | null;
   friendlyName: string | null;  // Human-friendly name derived from their public key
+  verification: PeerVerificationStatus;  // Phase 2 bound-SAS verification state
+  fingerprint: string | null;  // Remote DTLS fingerprint observed in SDP
 }
 
 export interface PeerInfo {
@@ -72,7 +86,12 @@ export type DataChannelMessage =
   | { type: 'file-chunk'; fileId: string; chunkIndex: number }
   | { type: 'file-end'; fileId: string }
   | { type: 'file-ack'; fileId: string; chunkIndex: number }
-  | { type: 'transfer-cancel'; fileId: string };
+  | { type: 'file-accept'; fileId: string }
+  | { type: 'file-decline'; fileId: string }
+  | { type: 'transfer-cancel'; fileId: string }
+  // Phase 2 verification protocol over the data channel
+  | { type: 'verification-init'; nonce: string; fp: string; jwk: string }
+  | { type: 'verification-sig'; signature: string };
 
 // Crypto Types
 export interface KeyPair {

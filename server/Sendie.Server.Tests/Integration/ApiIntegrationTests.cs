@@ -150,12 +150,18 @@ public class ApiIntegrationTests : IClassFixture<TestWebApplicationFactory>
     }
 
     [Fact]
-    public async Task GetSession_WithInvalidId_ShouldReturnNotFound()
+    public async Task GetSession_WithInvalidId_ShouldReturnBadRequest()
     {
-        // Act
+        // Malformed ID (wrong length) is rejected at the API boundary.
         var response = await _client.GetAsync("/api/sessions/nonexistent");
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
 
-        // Assert
+    [Fact]
+    public async Task GetSession_WithValidUnknownId_ShouldReturnNotFound()
+    {
+        // Well-formed but unknown session ID returns 404.
+        var response = await _client.GetAsync("/api/sessions/aaaaaaaaaaaaaaaaaaaaaa");
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 

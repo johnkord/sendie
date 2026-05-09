@@ -1,9 +1,15 @@
 #!/bin/bash
 set -e
 
-# Load environment variables from .env if it exists
+# Load environment variables from .env if it exists.
+# Using `set -a; source` lets bash parse quoted values correctly; the older
+# `export $(grep ... | xargs)` pattern silently mangles values with spaces or
+# shell metacharacters and is a known footgun for credentials.
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
 fi
 
 # Configuration - Set these in .env or as environment variables
@@ -60,3 +66,29 @@ kubectl get pods -n sendie
 echo ""
 echo "🌐 Ingress:"
 kubectl get ingress -n sendie
+
+# ---------------------------------------------------------------------------
+# Post-deploy smoke tests.
+# Set SKIP_SMOKE=1 to bypass (don't, except for the very first deploy where
+# you don't yet have a public URL to hit).
+# ---------------------------------------------------------------------------
+if [ "${SKIP_SMOKE:-0}" = "1" ]; then
+    echo "⚠️  Skipping post-deploy smoke tests (SKIP_SMOKE=1)"
+elif [ -n "${PUBLIC_URL:-}" ]; then
+    echo ""
+    echo "→ Running post-deploy smoke tests against $PUBLIC_URL ..."
+    if ! ./scripts/smoke.sh "$PUBLIC_URL"; then
+        echo "❌ Post-deploy smoke tests FAILED. Investigate before declaring success."
+        exit 2
+    fi
+else
+    echo "⚠️  PUBLIC_URL not set; skipping HTTP smoke tests."
+    echo "   Run manually: ./scripts/smoke.sh https://your-host"
+fi
+
+echo ""
+echo "→ To verify pod hardening (S9 of the remediation plan), run:"
+echo "     kubectl exec -n sendie deployment/sendie-server -- sh -c \"\$(cat scripts/verify-pod.sh)\""
+echo ""
+echo "→ Browser-only smoke tests (S1–S5, S8) MUST be run by hand. See"
+echo "   docs/security-remediation-plan.md §8.2."

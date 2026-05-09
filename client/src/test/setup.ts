@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom';
+import { webcrypto } from 'node:crypto';
 
 // Mock matchMedia
 Object.defineProperty(window, 'matchMedia', {
@@ -15,27 +16,15 @@ Object.defineProperty(window, 'matchMedia', {
   }),
 });
 
-// Mock crypto API
+// Wire WebCrypto for tests. The default jsdom environment does not expose
+// crypto.subtle, and the previous stub returned all-zero buffers from
+// digest/sign/verify which made bound-SAS tests pass vacuously (every key
+// produced the same SAS). Use Node's webcrypto so cryptographic invariants
+// are exercised.
 Object.defineProperty(globalThis, 'crypto', {
-  value: {
-    subtle: {
-      generateKey: async () => ({
-        publicKey: { type: 'public' },
-        privateKey: { type: 'private' },
-      }),
-      exportKey: async () => ({ kty: 'EC', crv: 'P-256', x: 'test', y: 'test' }),
-      importKey: async () => ({ type: 'public' }),
-      sign: async () => new ArrayBuffer(64),
-      verify: async () => true,
-      digest: async () => new ArrayBuffer(32),
-    },
-    getRandomValues: (arr: Uint8Array) => {
-      for (let i = 0; i < arr.length; i++) {
-        arr[i] = Math.floor(Math.random() * 256);
-      }
-      return arr;
-    },
-  },
+  value: webcrypto,
+  configurable: true,
+  writable: true,
 });
 
 // Mock RTCPeerConnection
