@@ -6,7 +6,8 @@ import {
   multiPeerWebRTCService, 
   cryptoService, 
   multiPeerFileTransferService,
-  verificationService
+  verificationService,
+  voiceService
 } from '../services';
 import { 
   FileDropZone, 
@@ -276,6 +277,7 @@ export default function MultiPeerSessionPage() {
       multiPeerWebRTCService.off('onDataChannelClose');
       verificationService.off('onVerificationComplete');
       verificationService.reset();
+      voiceService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
       signalingService.disconnect();
@@ -372,8 +374,9 @@ export default function MultiPeerSessionPage() {
     const { broadcastMode, clearQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } =
       useAppStore.getState();
 
-    // Determine whether this is the first verified peer. One-time queued
-    // files only go to the first verified joiner (the historical contract).
+    // "Is this the first verified peer in this session lifecycle?" If yes,
+    // they get the one-time queued files. We answer it by checking that no
+    // other open data channel currently belongs to a verified peer.
     const otherOpenChannels = multiPeerWebRTCService.getOpenChannels().filter(id => id !== peerId);
     const isFirstVerifiedPeer = otherOpenChannels.every(id => !verificationService.isVerified(id));
 
@@ -458,6 +461,7 @@ export default function MultiPeerSessionPage() {
   const handleKicked = useCallback(() => {
     console.log('You have been kicked from the session');
     multiPeerWebRTCService.closeAllConnections();
+    voiceService.reset();
     clearPeers();
     signalingService.disconnect();
     navigate('/', { state: { kicked: true } });
@@ -566,6 +570,7 @@ export default function MultiPeerSessionPage() {
   const handleLeaveSession = useCallback(() => {
     signalingService.leaveSession();
     multiPeerWebRTCService.closeAllConnections();
+    voiceService.reset();
     clearPeers();
     clearQueuedFiles();
     setBroadcastMode(false);

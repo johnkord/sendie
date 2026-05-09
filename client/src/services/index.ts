@@ -4,5 +4,6 @@ export { cryptoService, CryptoService } from './CryptoService';
 export { multiPeerFileTransferService, MultiPeerFileTransferService } from './MultiPeerFileTransferService';
 export { verificationService } from './VerificationService';
 export type { VerificationResult } from './VerificationService';
+export { voiceService } from './VoiceService';
 export { authService } from './AuthService';
 export type { User, AllowedUser, AdminUsersResponse } from './AuthService';

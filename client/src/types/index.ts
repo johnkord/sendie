@@ -31,6 +31,9 @@ export interface PeerConnectionState {
   friendlyName: string | null;  // Human-friendly name derived from their public key
   verification: PeerVerificationStatus;  // Phase 2 bound-SAS verification state
   fingerprint: string | null;  // Remote DTLS fingerprint observed in SDP
+  // Voice PoC: state of the remote peer's outgoing audio. `null` means we
+  // have not received a voice-state message from them, treat as not sharing.
+  voiceState: { sharing: boolean; muted: boolean } | null;
 }
 
 export interface PeerInfo {
@@ -91,7 +94,13 @@ export type DataChannelMessage =
   | { type: 'transfer-cancel'; fileId: string }
   // Phase 2 verification protocol over the data channel
   | { type: 'verification-init'; nonce: string; fp: string; jwk: string }
-  | { type: 'verification-sig'; signature: string };
+  | { type: 'verification-sig'; signature: string }
+  // Voice PoC: out-of-band mute-state propagation. The mute itself is
+  // track.enabled = false (instant, no renegotiation); this message tells
+  // the remote UI so it can show a 🔇 indicator. Pure UX hint; the
+  // underlying audio is already silenced regardless of whether the
+  // message arrives.
+  | { type: 'voice-state'; muted: boolean; sharing: boolean };
 
 // Crypto Types
 export interface KeyPair {

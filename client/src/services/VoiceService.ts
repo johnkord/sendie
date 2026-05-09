@@ -1,4 +1,6 @@
 import { multiPeerWebRTCService } from './MultiPeerWebRTCService';
+import { useAppStore } from '../stores/appStore';
+import type { DataChannelMessage } from '../types';
 
 /**
  * Voice PoC: minimal service that wraps getUserMedia + the receiving
@@ -23,6 +25,10 @@ export type VoiceEvents = {
   onStopped: () => void;
   onPeerStreamAdded: (peerId: string) => void;
   onPeerStreamRemoved: (peerId: string) => void;
+  // Fired when a remote peer's <audio> element fails to autoplay (no prior
+  // user gesture on the receiving side). The page can show a banner asking
+  // the user to click anywhere to enable audio.
+  onAutoplayBlocked: (peerId: string) => void;
   onError: (err: Error) => void;
 };
 
@@ -38,14 +44,37 @@ class VoiceService {
   private active = false;
 
   constructor() {
-    // Subscribe once for the lifetime of the page. Pointed at the same
-    // MultiPeerWebRTCService instance every other service uses.
+    // Subscribe once for the lifetime of the page.
     multiPeerWebRTCService.on('onTrack', (peerId, stream, kind) => {
       if (kind !== 'audio') return;
       this.attachRemoteAudio(peerId, stream);
     });
     multiPeerWebRTCService.on('onPeerDisconnected', (peerId) => {
       this.detachRemoteAudio(peerId);
+    });
+    // Listen for inbound voice-state messages so the local UI can show
+    // 'sharing' / 'muted' indicators on remote tiles. The mute itself is
+    // already reflected in the audio (track.enabled = false silences
+    // outgoing); this is purely a UX hint.
+    multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
+      if (typeof data !== 'string') return;
+      try {
+        const msg = JSON.parse(data) as DataChannelMessage;
+        if (msg.type === 'voice-state') {
+          useAppStore.getState().updatePeer(peerId, {
+            voiceState: { sharing: msg.sharing, muted: msg.muted },
+          });
+        }
+      } catch {
+        // Not JSON we care about; ignore.
+      }
+    });
+    // When voice ends with a peer, clear their voice state.
+    multiPeerWebRTCService.on('onPeerDisconnected', (peerId) => {
+      const peers = useAppStore.getState().peers;
+      if (peers.has(peerId)) {
+        useAppStore.getState().updatePeer(peerId, { voiceState: null });
+      }
     });
   }
 
@@ -99,6 +128,7 @@ class VoiceService {
 
       this.active = true;
       this.events.onStarted?.();
+      this.broadcastState();
     } catch (err) {
       this.events.onError?.(err as Error);
       throw err;
@@ -123,6 +153,7 @@ class VoiceService {
     this.localAnalyser = null;
     this.active = false;
     this.events.onStopped?.();
+    this.broadcastState();
   }
 
   /**
@@ -133,6 +164,7 @@ class VoiceService {
     for (const track of this.localStream.getAudioTracks()) {
       track.enabled = !muted;
     }
+    this.broadcastState();
   }
 
   /**
@@ -159,6 +191,31 @@ class VoiceService {
     return this.remoteAudioByPeer.get(peerId)?.srcObject as MediaStream | null;
   }
 
+  /**
+   * Tear everything down. Call on session leave: stops local mic, removes
+   * every <audio> element. Idempotent.
+   */
+  reset(): void {
+    void this.stop();
+    for (const peerId of [...this.remoteAudioByPeer.keys()]) {
+      this.detachRemoteAudio(peerId);
+    }
+  }
+
+  /**
+   * Broadcast our current voice state (sharing / muted) to every peer over
+   * the data channel. Pure UX hint; mute is already enforced locally on
+   * the outgoing track.
+   */
+  private broadcastState(): void {
+    const msg: DataChannelMessage = {
+      type: 'voice-state',
+      sharing: this.active,
+      muted: this.isMuted(),
+    };
+    multiPeerWebRTCService.broadcast(JSON.stringify(msg));
+  }
+
   // ------ private --------------------------------------------------------
 
   private attachRemoteAudio(peerId: string, stream: MediaStream): void {
@@ -167,12 +224,24 @@ class VoiceService {
       el = document.createElement('audio');
       el.autoplay = true;
       // Detached <audio> elements still play in modern browsers; keeping them
-      // out of the DOM avoids any stray UI flash. If autoplay is blocked, we
-      // would surface here; the prior user gesture (Start voice) should
-      // satisfy the autoplay policy on both browsers.
+      // out of the DOM avoids any stray UI flash. If the receiver hasn't yet
+      // produced a user gesture (i.e. they joined and the host started
+      // talking before they clicked anything), play() is rejected and the
+      // browser will start playing once the next gesture happens. We surface
+      // that state to the page so a banner can be shown.
       this.remoteAudioByPeer.set(peerId, el);
     }
     el.srcObject = stream;
+    // Try to play explicitly. If autoplay is blocked, we get a rejected
+    // promise (typically NotAllowedError); the page can prompt the user.
+    void el.play().catch((err: Error) => {
+      if (err?.name === 'NotAllowedError' || err?.name === 'NotSupportedError') {
+        console.warn(`Autoplay blocked for ${peerId}; user gesture required.`);
+        this.events.onAutoplayBlocked?.(peerId);
+      } else {
+        console.warn(`Could not play remote audio for ${peerId}:`, err);
+      }
+    });
     this.events.onPeerStreamAdded?.(peerId);
   }
 

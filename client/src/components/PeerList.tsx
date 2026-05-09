@@ -76,6 +76,14 @@ export function PeerList({ peers, localFriendlyName, onRemovePeer, onKickPeer, i
                         👑 Host
                       </span>
                     )}
+                    {state.voiceState?.sharing && (
+                      <span
+                        className={`text-sm ${state.voiceState.muted ? 'text-gray-400' : 'text-green-400'}`}
+                        title={state.voiceState.muted ? 'Microphone muted' : 'Speaking'}
+                      >
+                        {state.voiceState.muted ? '🔇' : '🎙️'}
+                      </span>
+                    )}
                   </div>
                   <p className={`text-xs ${config.color}`}>
                     {config.label}

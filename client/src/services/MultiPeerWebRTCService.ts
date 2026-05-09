@@ -46,7 +46,11 @@ interface PeerConnectionInfo {
  */
 export class MultiPeerWebRTCService {
   private peerConnections: Map<string, PeerConnectionInfo> = new Map();
-  private events: Partial<MultiPeerWebRTCEvents> = {};
+  // Events support multiple subscribers (the file-transfer service and the
+  // voice service both want onDataChannelMessage / onPeerDisconnected /
+  // onTrack). We hand out an unsubscribe function from on() so callers can
+  // tear down cleanly on session leave.
+  private events: { [K in keyof MultiPeerWebRTCEvents]?: Set<MultiPeerWebRTCEvents[K]> } = {};
   private iceServers: IceServerConfig[] = [];
   private initialized = false;
   // Local connection ID, set after the SignalR JoinSession call returns.
@@ -75,12 +79,51 @@ export class MultiPeerWebRTCService {
     this.initialized = true;
   }
 
-  on<K extends keyof MultiPeerWebRTCEvents>(event: K, handler: MultiPeerWebRTCEvents[K]): void {
-    this.events[event] = handler;
+  /**
+   * Subscribe to an event. Multiple subscribers are supported per event.
+   * Returns an unsubscribe function.
+   */
+  on<K extends keyof MultiPeerWebRTCEvents>(event: K, handler: MultiPeerWebRTCEvents[K]): () => void {
+    let set = this.events[event];
+    if (!set) {
+      set = new Set() as never;
+      this.events[event] = set;
+    }
+    (set as Set<MultiPeerWebRTCEvents[K]>).add(handler);
+    return () => {
+      (this.events[event] as Set<MultiPeerWebRTCEvents[K]> | undefined)?.delete(handler);
+    };
   }
 
-  off<K extends keyof MultiPeerWebRTCEvents>(event: K): void {
-    delete this.events[event];
+  /**
+   * Unsubscribe a specific handler. If no handler is provided, removes
+   * all handlers for the event (back-compat with the old single-handler
+   * model).
+   */
+  off<K extends keyof MultiPeerWebRTCEvents>(event: K, handler?: MultiPeerWebRTCEvents[K]): void {
+    const set = this.events[event] as Set<MultiPeerWebRTCEvents[K]> | undefined;
+    if (!set) return;
+    if (handler) {
+      set.delete(handler);
+    } else {
+      set.clear();
+    }
+  }
+
+  private emit<K extends keyof MultiPeerWebRTCEvents>(
+    event: K,
+    ...args: Parameters<MultiPeerWebRTCEvents[K]>
+  ): void {
+    const set = this.events[event] as Set<MultiPeerWebRTCEvents[K]> | undefined;
+    if (!set) return;
+    for (const handler of set) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (handler as (...a: any[]) => void)(...args);
+      } catch (err) {
+        console.error(`Handler for ${event} threw:`, err);
+      }
+    }
   }
 
   /**
@@ -110,18 +153,19 @@ export class MultiPeerWebRTCService {
       iceServers: this.iceServers,
     });
 
-    // Polite-peer assignment: lexicographic on connection IDs. Both peers
-    // arrive at the same answer because connection IDs are stable strings
-    // assigned by the server.
-    const polite = this.localConnectionId !== null && this.localConnectionId < peerId;
-
     const peerInfo: PeerConnectionInfo = {
       connection,
       dataChannel: null,
       pendingCandidates: [],
       makingOffer: false,
       ignoreOffer: false,
-      polite,
+      // polite is resolved lazily by getPolite() below. Resolving here
+      // would freeze in `false` if setLocalConnectionId() has not been
+      // called yet, which would cause both peers to think they are
+      // impolite (glare deadlock). The lazy form re-checks each time we
+      // need it, so it is correct as long as setLocalConnectionId() has
+      // been called by the time the first offer/answer arrives.
+      polite: false,
       pinnedRemoteFp: null,
     };
 
@@ -166,12 +210,12 @@ export class MultiPeerWebRTCService {
       switch (connection.iceConnectionState) {
         case 'connected':
         case 'completed':
-          this.events.onPeerConnected?.(peerId);
+          this.emit('onPeerConnected', peerId);
           break;
         case 'disconnected':
         case 'failed':
         case 'closed':
-          this.events.onPeerDisconnected?.(peerId);
+          this.emit('onPeerDisconnected', peerId);
           break;
       }
     };
@@ -186,7 +230,7 @@ export class MultiPeerWebRTCService {
     connection.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track]);
       console.log(`Received ${event.track.kind} track from ${peerId}`);
-      this.events.onTrack?.(peerId, stream, event.track.kind as 'audio' | 'video');
+      this.emit('onTrack', peerId, stream, event.track.kind as 'audio' | 'video');
     };
 
     this.peerConnections.set(peerId, peerInfo);
@@ -223,23 +267,23 @@ export class MultiPeerWebRTCService {
       console.log(`Data channel opened with ${peerId}`);
       // Report connection established to server for TTL management
       signalingService.reportConnectionEstablished(peerId);
-      this.events.onDataChannelOpen?.(peerId);
+      this.emit('onDataChannelOpen', peerId);
     };
 
     channel.onclose = () => {
       console.log(`Data channel closed with ${peerId}`);
       // Report connection closed to server for TTL management
       signalingService.reportConnectionClosed(peerId);
-      this.events.onDataChannelClose?.(peerId);
+      this.emit('onDataChannelClose', peerId);
     };
 
     channel.onerror = (error) => {
       console.error(`Data channel error with ${peerId}:`, error);
-      this.events.onError?.(peerId, new Error('Data channel error'));
+      this.emit('onError', peerId, new Error('Data channel error'));
     };
 
     channel.onmessage = (event) => {
-      this.events.onDataChannelMessage?.(peerId, event.data);
+      this.emit('onDataChannelMessage', peerId, event.data);
     };
   }
 
@@ -273,6 +317,21 @@ export class MultiPeerWebRTCService {
   }
 
   /**
+   * Resolve whether the local peer should play the polite role for the given
+   * peer. Lexicographic on connection IDs so both ends agree without
+   * coordination. Returns false if our local connection ID is not yet known
+   * — in that case the caller has set up the connection too eagerly and
+   * glare can deadlock; we log a warning so the bug is visible.
+   */
+  private getPolite(peerId: string): boolean {
+    if (!this.localConnectionId) {
+      console.warn(`getPolite(${peerId}) called before setLocalConnectionId; defaulting to impolite`);
+      return false;
+    }
+    return this.localConnectionId < peerId;
+  }
+
+  /**
    * Handle an incoming offer from a specific peer (perfect-negotiation).
    *
    * If we are mid-offer ourselves and we are the impolite peer, we ignore
@@ -293,9 +352,10 @@ export class MultiPeerWebRTCService {
 
     // Glare detection: if we are the impolite peer mid-offer, ignore this
     // incoming offer. The remote (polite) peer will roll its own offer back.
+    const polite = this.getPolite(peerId);
     const offerCollision =
       peerInfo.makingOffer || connection.signalingState !== 'stable';
-    peerInfo.ignoreOffer = !peerInfo.polite && offerCollision;
+    peerInfo.ignoreOffer = !polite && offerCollision;
     if (peerInfo.ignoreOffer) {
       console.log(`Ignoring offer from ${peerId} (impolite + glare)`);
       return;
@@ -445,7 +505,7 @@ export class MultiPeerWebRTCService {
     console.error(
       `Fingerprint invariant violated for ${peerId}: expected ${info.pinnedRemoteFp}, got ${current}`,
     );
-    this.events.onFingerprintInvariantViolated?.(peerId, info.pinnedRemoteFp, current);
+    this.emit('onFingerprintInvariantViolated', peerId, info.pinnedRemoteFp, current);
     this.closePeerConnection(peerId);
     return false;
   }
@@ -477,26 +537,32 @@ export class MultiPeerWebRTCService {
   /**
    * Stop sharing a previously-added stream. Removes its tracks from every
    * peer connection (which triggers renegotiation) and stops the tracks.
+   *
+   * Order-of-ops matters: we remove from peer connections BEFORE stopping
+   * tracks, otherwise getSenders().filter(sender.track === track) misses
+   * because stopped tracks may compare unequally on some browsers.
    */
   removeLocalStream(): void {
-    for (const track of this.localTracks) {
-      try {
-        track.stop();
-      } catch {
-        // ignore
-      }
-    }
+    const tracks = this.localTracks;
+    // 1. Remove from every peer connection first.
     for (const info of this.peerConnections.values()) {
-      // Find each sender that corresponds to a local track and remove it.
       const senders = info.connection.getSenders();
       for (const sender of senders) {
-        if (sender.track && this.localTracks.includes(sender.track)) {
+        if (sender.track && tracks.includes(sender.track)) {
           try {
             info.connection.removeTrack(sender);
           } catch (err) {
             console.warn('removeTrack failed:', err);
           }
         }
+      }
+    }
+    // 2. Now stop the tracks themselves.
+    for (const track of tracks) {
+      try {
+        track.stop();
+      } catch {
+        // ignore
       }
     }
     this.localTracks = [];
