@@ -38,27 +38,40 @@ class CameraService {
   private active = false;
 
   constructor() {
+    // Buffer of incoming video streams whose owner has not yet announced
+    // (via camera-state) which one is the camera. The announcement can
+    // arrive AFTER ontrack on a slow data channel; without a buffer we
+    // would either drop the camera or claim a screen-share track by
+    // mistake. Symmetric to the same pattern in ScreenShareService.
+    const ANNOUNCE_BUFFER_TTL_MS = 5_000;
+    const pendingByPeer: Map<string, Map<string, MediaStream>> = new Map();
+    const sweepPending = (peerId: string, streamId: string) => {
+      setTimeout(() => {
+        pendingByPeer.get(peerId)?.delete(streamId);
+      }, ANNOUNCE_BUFFER_TTL_MS);
+    };
+
     multiPeerWebRTCService.on('onTrack', (peerId, stream, kind) => {
       if (kind !== 'video') return;
-      // Disambiguate camera vs screen-share streams (both arrive as
-      // kind=video). Only claim the stream if the peer has announced this
-      // streamId as their camera. If they have not announced anything yet,
-      // tentatively accept (legacy behavior); the screen-state handler in
-      // ScreenShareService will displace us if it turns out this stream is
-      // their screen capture.
       const peer = useAppStore.getState().peers.get(peerId);
       const announcedCamera = peer?.cameraState?.streamId;
       const announcedScreen = peer?.screenState?.streamId;
+      // Disambiguate against an already-known screen stream.
       if (announcedScreen && stream.id === announcedScreen) return;
-      if (announcedCamera && stream.id !== announcedCamera) return;
-      this.remoteStreamsByPeer.set(peerId, stream);
-      // Notify subscribers that a new stream is available for this peer.
-      // RemoteVideos uses this to re-bind its <video> element rather than
-      // relying on a re-render driven by cameraState (which can arrive on
-      // the data channel before ontrack fires, leading to a stuck black tile).
-      for (const cb of this.streamSubscribers) cb(peerId);
+      if (announcedCamera && stream.id === announcedCamera) {
+        this.remoteStreamsByPeer.set(peerId, stream);
+        for (const cb of this.streamSubscribers) cb(peerId);
+        return;
+      }
+      // Unknown stream: buffer briefly. Either a camera-state will land
+      // and claim it, or a screen-state will land in ScreenShareService
+      // and the buffer will time out harmlessly.
+      if (!pendingByPeer.has(peerId)) pendingByPeer.set(peerId, new Map());
+      pendingByPeer.get(peerId)!.set(stream.id, stream);
+      sweepPending(peerId, stream.id);
     });
     multiPeerWebRTCService.on('onPeerDisconnected', (peerId) => {
+      pendingByPeer.delete(peerId);
       this.remoteStreamsByPeer.delete(peerId);
       for (const cb of this.streamSubscribers) cb(peerId);
     });
@@ -66,14 +79,41 @@ class CameraService {
       if (typeof data !== 'string') return;
       try {
         const msg = JSON.parse(data) as DataChannelMessage;
-        if (msg.type === 'camera-state') {
-          useAppStore.getState().updatePeer(peerId, {
-            cameraState: { sharing: msg.sharing, streamId: msg.streamId },
-          });
+        if (msg.type !== 'camera-state') return;
+        useAppStore.getState().updatePeer(peerId, {
+          cameraState: { sharing: msg.sharing, streamId: msg.streamId },
+        });
+        if (msg.sharing && msg.streamId) {
+          // Promote a buffered stream that matches the announcement.
+          const pending = pendingByPeer.get(peerId)?.get(msg.streamId);
+          if (pending) {
+            this.remoteStreamsByPeer.set(peerId, pending);
+            pendingByPeer.get(peerId)!.delete(msg.streamId);
+            for (const cb of this.streamSubscribers) cb(peerId);
+          }
+        }
+        if (!msg.sharing) {
+          if (this.remoteStreamsByPeer.delete(peerId)) {
+            for (const cb of this.streamSubscribers) cb(peerId);
+          }
         }
       } catch {
         // not for us
       }
+    });
+    // Re-announce our state to a peer as soon as their data channel
+    // opens. Without this, a late joiner who arrives mid-share would
+    // see our ontrack but never get a camera-state message identifying
+    // which streamId is the camera, so the strict matching above would
+    // drop the stream into the pending buffer and time out.
+    multiPeerWebRTCService.on('onDataChannelOpen', (peerId) => {
+      if (!this.active) return;
+      const msg: DataChannelMessage = {
+        type: 'camera-state',
+        sharing: true,
+        streamId: this.localStream?.id,
+      };
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
     });
   }
 

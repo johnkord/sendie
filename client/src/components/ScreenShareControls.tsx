@@ -82,7 +82,10 @@ export function ScreenShareControls() {
             autoPlay
             muted
             playsInline
-            className="h-16 w-auto rounded border border-gray-600 bg-black"
+            // h-24 (96px) so the sharer can verify what's actually
+            // captured at a glance. Cameras need much less; screens have
+            // small text everywhere.
+            className="h-24 w-auto rounded border border-gray-600 bg-black"
             title="Self preview (what others see)"
           />
         </>

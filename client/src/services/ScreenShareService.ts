@@ -28,10 +28,11 @@ import type { DataChannelMessage } from '../types';
  * thermally throttle the sender.
  */
 
-// Only one peer typically shares their screen at a time, but the protocol
-// itself is symmetric and N-encoder fanout is what burns CPU. The cap is
-// on the number of receivers; if more peers than this are in the room
-// we refuse a fresh start.
+// Encoder-fanout cap. The sharer encodes the screen track once per peer
+// connection (one RTCRtpSender per peer in a mesh, no SFU). Above this
+// many receivers we refuse to start rather than thermally throttle the
+// sender. v2 in the proposal switches to encoded-fanout so this cap can
+// rise dramatically.
 export const MAX_SCREEN_PEERS = 4;
 
 export type ScreenShareEvents = {
@@ -122,6 +123,19 @@ class ScreenShareService {
         // not for us
       }
     });
+    // Re-announce our share to a peer as soon as their data channel
+    // opens. Without this, a late joiner mid-share sees our ontrack but
+    // never gets a screen-state message naming the streamId, so the
+    // pending buffer would time out and the joiner would see nothing.
+    multiPeerWebRTCService.on('onDataChannelOpen', (peerId) => {
+      if (!this.active) return;
+      const msg: DataChannelMessage = {
+        type: 'screen-state',
+        sharing: true,
+        streamId: this.localStream?.id,
+      };
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
+    });
   }
 
   /**
@@ -163,15 +177,24 @@ class ScreenShareService {
   }
 
   /**
-   * Number of peers (including local if active) currently sharing screen.
+   * Number of OTHER peers currently sharing screen, observed from peer
+   * state. Useful for the UI badge "someone else is sharing".
    */
-  countSharing(): number {
-    let n = this.active ? 1 : 0;
+  countOthersSharing(): number {
+    let n = 0;
     const peers = useAppStore.getState().peers;
     for (const p of peers.values()) {
       if (p.screenState?.sharing) n++;
     }
     return n;
+  }
+
+  /**
+   * Number of peers we would have to encode for if we started right now.
+   * Drives the MAX_SCREEN_PEERS receiver-fanout cap.
+   */
+  private countReceivers(): number {
+    return useAppStore.getState().peers.size;
   }
 
   /**
@@ -185,9 +208,10 @@ class ScreenShareService {
       this.events.onError?.(err);
       throw err;
     }
-    if (this.countSharing() >= MAX_SCREEN_PEERS) {
+    if (this.countReceivers() > MAX_SCREEN_PEERS) {
       const err = new Error(
-        `Too many screen shares already (${MAX_SCREEN_PEERS} max). Ask someone to stop sharing first.`,
+        `Too many peers to share to (${this.countReceivers()}); the encoder cap is ${MAX_SCREEN_PEERS}. ` +
+        `Ask some peers to leave first, or use a smaller mesh.`,
       );
       this.events.onError?.(err);
       throw err;
@@ -209,11 +233,23 @@ class ScreenShareService {
         systemAudio: 'exclude',
       } as DisplayMediaStreamOptions;
       const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-      this.localStream = stream;
       const [videoTrack] = stream.getVideoTracks();
       if (!videoTrack) {
+        // Stop any other tracks we might have got back; should not
+        // happen in practice but defensive.
+        for (const t of stream.getTracks()) t.stop();
         throw new Error('Screen capture returned no video track');
       }
+      // Pathological race: if the user dismissed the picker right after
+      // accepting it, the returned track can already be in "ended" state
+      // by the time our await unblocks. Clean up and bail rather than
+      // pushing a dead track onto every peer connection.
+      if (videoTrack.readyState === 'ended') {
+        for (const t of stream.getTracks()) t.stop();
+        this.events.onError?.(new Error('Screen share cancelled'));
+        return;
+      }
+      this.localStream = stream;
       // Tell the encoder this is screen content. Without this, browsers
       // apply temporal noise reduction tuned for camera feeds, which
       // smears text. Major impact, single line of code.
