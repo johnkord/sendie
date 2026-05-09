@@ -130,7 +130,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Default OFF: receivers must explicitly accept incoming files. Prevents
   // anyone with a session URL from silently dropping files into recipients'
   // Downloads folders. The user can opt back into auto-receive per session.
-  autoReceive: false,
+  autoReceive: true,
 
   addQueuedFile: (file: File) =>
     set((state) => ({
