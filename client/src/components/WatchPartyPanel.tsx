@@ -221,6 +221,13 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   // active. Updated in sync with the video element by the
   // WatchPartyService for the host, by the drift loop for followers.
   const [playbackRate, setPlaybackRate] = useState(1);
+  // Stream-mode host diagnostic: number of MediaStreamTracks currently
+  // produced by captureStream(). 0 means we are not actually streaming
+  // anything (the source hasn't started playing); UI shows a big
+  // 'Click to start streaming' overlay in that case.
+  const [streamTracks, setStreamTracks] = useState(0);
+  const [paused, setPaused] = useState(true);
+  const [decodeError, setDecodeError] = useState<string | null>(null);
 
   // Convert the File to an object URL exactly once. Revoke on unmount
   // to free the kernel-side resources.
@@ -247,9 +254,46 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     };
   }, [objectUrl, state.role, state.mode]);
 
-  // Track playbackRate changes from outside (the service sets
-  // videoEl.playbackRate during drift correction; we want our
-  // dropdown to reflect that without forcing a re-render every frame).
+  // Watch the host's stream-track count + decode errors. Drives the
+  // 'Click to start streaming' overlay and the codec error message.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const updateTracks = () => {
+      setStreamTracks(watchPartyService.getStreamTrackCount());
+    };
+    const onPlay = () => { setPaused(false); updateTracks(); };
+    const onPause = () => { setPaused(true); updateTracks(); };
+    const onError = () => {
+      const err = el.error;
+      const msg = err?.code === 4
+        ? 'This file format is not playable in your browser. Try a different file (H.264/AAC mp4 works in all browsers).'
+        : err?.message || 'Video playback error.';
+      setDecodeError(msg);
+    };
+    el.addEventListener('play', onPlay);
+    el.addEventListener('pause', onPause);
+    el.addEventListener('error', onError);
+    const i = window.setInterval(updateTracks, 500);
+    updateTracks();
+    return () => {
+      el.removeEventListener('play', onPlay);
+      el.removeEventListener('pause', onPause);
+      el.removeEventListener('error', onError);
+      clearInterval(i);
+    };
+  }, [objectUrl]);
+
+  const handleStartStream = () => {
+    const el = videoRef.current;
+    if (!el) return;
+    el.muted = true; // muted autoplay is universally allowed
+    el.play().catch((err) => {
+      console.error('[watch-party] manual play() failed:', err);
+    });
+  };
+
+  // Track playbackRate changes from outside.
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
@@ -307,35 +351,56 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
         </div>
       </div>
 
-      {objectUrl && (
-        <video
-          ref={videoRef}
-          src={objectUrl}
-          // Followers must NOT show native controls (would let them
-          // desync). Hosts get controls so they can scrub via the
-          // browser's UI; we forward play/pause/seeked via service.
-          controls={isHost}
-          playsInline
-          // Critical for stream mode: captureStream() returns an empty
-          // MediaStream until the element actually plays, so followers
-          // would be stuck on 'connecting...' forever if the host's
-          // <video> doesn't auto-start. Browsers only allow unmuted
-          // autoplay if the site has earned Media Engagement, which
-          // we cannot assume on a fresh install. So we autoplay
-          // MUTED. Per spec HTMLMediaElement.captureStream() taps the
-          // decoder output upstream of the element's mute stage, so
-          // peers still hear audio even though the host's local
-          // playback is silent. Host can unmute via the native
-          // controls whenever they want to hear it themselves.
-          autoPlay={isHost}
-          muted={isHost && state.mode === 'stream'}
-          className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
-        />
+      {decodeError && (
+        <p className="text-xs text-red-300/90 bg-red-500/10 border border-red-500/30 rounded p-2">
+          {decodeError}
+        </p>
       )}
-      {isHost && state.mode === 'stream' && (
+
+      {objectUrl && (
+        <div className="relative">
+          <video
+            ref={videoRef}
+            src={objectUrl}
+            // Followers must NOT show native controls (would let them
+            // desync). Hosts get controls so they can scrub via the
+            // browser's UI; we forward play/pause/seeked via service.
+            controls={isHost}
+            playsInline
+            // Critical for stream mode: captureStream() returns an empty
+            // MediaStream until the element actually plays, so followers
+            // would be stuck on 'connecting...' forever if the host's
+            // <video> doesn't start. Per HTML spec, captureStream()
+            // taps audio upstream of the mute stage, so muting the
+            // host's local playback does NOT silence what peers receive.
+            // The host can click the speaker icon to unmute for
+            // themselves.
+            autoPlay={isHost}
+            muted={isHost && state.mode === 'stream'}
+            className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
+          />
+          {/* Stream-mode host overlay: shows whenever we don't yet have
+              live tracks flowing. The big button forces a play() on a
+              fresh user-gesture click, which always succeeds. */}
+          {isHost && state.mode === 'stream' && (paused || streamTracks === 0) && !decodeError && (
+            <button
+              onClick={handleStartStream}
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white"
+            >
+              <span className="text-2xl">▶</span>
+              <span className="text-sm font-medium">Click to start streaming</span>
+              <span className="text-[11px] text-slate-300">
+                Tracks live: {streamTracks} (need at least 1)
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+      {isHost && state.mode === 'stream' && !decodeError && (
         <p className="text-[11px] text-slate-500">
-          Your video is muted locally so it could start automatically; viewers still hear
-          audio. Click the speaker icon in the player to unmute for yourself.
+          Your video plays muted locally so it could start automatically; viewers still
+          hear audio. Click the speaker icon in the player to unmute for yourself.
+          {streamTracks > 0 && ` Streaming ${streamTracks} track${streamTracks === 1 ? '' : 's'} to viewers.`}
         </p>
       )}
 

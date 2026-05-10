@@ -263,6 +263,11 @@ class WatchPartyService {
 
   getRemoteStream(): MediaStream | null { return this.remoteStream; }
 
+  /** Number of MediaStreamTracks currently produced by captureStream() on the host. 0 = not streaming. */
+  getStreamTrackCount(): number {
+    return this.streamCapture?.getTracks().filter((t) => t.readyState === 'live').length ?? 0;
+  }
+
   private notifyRemoteStream(): void {
     for (const cb of this.remoteStreamSubscribers) cb();
   }
