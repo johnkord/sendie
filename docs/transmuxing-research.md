@@ -1,6 +1,13 @@
 # Browser-side transmuxing for progressive playback
 
-Status: research. Last updated 2026-05.
+Status: **DEFERRED**. mp4box.js implementation built and shipped 2026-05-09; disabled the same day after dogfooding revealed an unfixable MSE interaction. Last updated 2026-05.
+
+> **Current state in production:** `runHostPrep` is gated on
+> `localStorage.sendie_wp_transmux=1`; off by default. Receivers
+> get original (non-fragmented) mp4 bytes, wait for the full
+> transfer, then play via direct `<video>` Blob URL. Reliable but
+> not progressive. The autopsy below explains why we got here, and
+> the alternatives section sketches paths that might actually work.
 
 ## The question
 
@@ -248,3 +255,270 @@ peer alternative as a v3 project.
 Estimated effort: 2-3 days for the integration including UI for
 the prep progress bar and end-to-end testing on a typical phone
 mp4, an OBS recording, and an old-encoder mp4 with `moov`-at-end.
+
+---
+
+## Autopsy: what went wrong with the mp4box.js attempt (2026-05)
+
+The implementation worked exactly as designed: host transmuxes plain
+mp4 to fmp4 in memory, sends fmp4 bytes to receiver, receiver feeds
+them through a `MediaSource`. Every visible piece of the pipeline
+landed correctly. The receiver still couldn't play.
+
+We shipped, dogfooded, and rolled back across roughly a dozen iterations.
+This section catalogs every theory, every fix, and the actual outcome,
+so a future engineer can avoid re-running the same experiments.
+
+### The fundamental incompatibility we hit
+
+**Fragmented mp4 (fmp4) is not playable via a direct `<video src=blob:...>` URL.**
+It is only ingestible via the Media Source Extensions API (`MediaSource`
++ `SourceBuffer.appendBuffer`). This is by design: fmp4's container
+structure (init segment + sequence of `moof`/`mdat` fragments) is what
+MSE consumes, and `<video>` directly expects monolithic mp4.
+
+Browsers correctly reject a direct fmp4 Blob URL with
+`NotSupportedError: no supported source`. We confirmed this in Chrome
+129 and Firefox 142.
+
+**Why this matters:** Sendie's pipeline has two paths:
+
+1. **Happy path (MSE):** receiver pipes fmp4 chunks into MSE.
+2. **Fallback (Blob assembly):** if MSE fails, receiver concatenates all
+   chunks into a Blob and binds it as `<video src=blob:...>`.
+
+We always need both. With **plain mp4** input, both work: MSE rejects
+plain mp4 (no `mvex`), but the Blob fallback plays it natively.
+
+With **fmp4** input (after our transmux), the Blob fallback can't
+play it, so we _must_ get MSE working. And MSE wasn't.
+
+### What MSE was doing wrong
+
+The receiver consistently saw:
+
+```
+[watch-party] receiver MSE check: streamable= true codec= ... MSE supported= true
+[watch-party] SourceBuffer error; falling back to Blob. video.error: none
+```
+
+The `SourceBuffer.error` event fires with no detail, and `video.error`
+is `null` at that moment because the error originated in the source
+buffer's parser, not the media element. Chrome and Firefox both emit
+this event with no diagnostic info exposed to JavaScript.
+
+We tried, in order:
+
+| # | Theory | Fix | Outcome |
+|---|---|---|---|
+| 1 | Codec mime had vendor `profiles="..."` param confusing addSourceBuffer | Strip to type+codecs only | Cleaner mime; SourceBuffer error still fired |
+| 2 | `info.mime` codec doesn't match real moov | Synthesize from `info.tracks[i].codec` | Matches better, still fails |
+| 3 | nbSamples=1000 produces 33s fragments; first fragment too big | Lower to nbSamples=60 | Still fails |
+| 4 | Multiple init segments in output | Use only initSegs[0] | Still fails |
+| 5 | `sb.mode = 'sequence'` conflicts with mp4box's tfdt | Remove, default to 'segments' | Still fails |
+| 6 | Browser autoplay policy, NOT decoder | Add muted-fallback play() | Wasn't the bug |
+| 7 | Listener attached after canplay fired | Synchronous readyState check | Wasn't the bug |
+| 8 | Per-timeline play-kick belt-and-suspenders | Idempotent kick | Wasn't the bug |
+
+### What we never tried that might have worked
+
+We didn't reproduce the failure outside Sendie. The right next debug
+step is a minimal HTML page that:
+
+1. `fetch()`s the actual fmp4 bytes mp4box produced.
+2. Feeds them to a fresh `MediaSource` with the sanitized codec mime.
+3. Watches `SourceBuffer.error` and the parsed-but-rejected box logs
+   in `chrome://media-internals/`.
+
+`chrome://media-internals/` is the only way to get the real error from
+the demuxer. The MSE spec deliberately doesn't surface decoder errors
+to JS for security reasons (info leak about codec implementation).
+
+We also never tried a different transmuxer. mp4box.js is the canonical
+choice but not the only one (see alternatives below).
+
+### Why we backed it out
+
+The failure mode was strictly worse than not-transmuxing:
+
+- **No transmux:** MSE rejects plain mp4 quickly, fall back to Blob,
+  Blob plays. Latency to first frame = full transfer time. Reliable.
+- **With transmux:** MSE accepts fmp4 init segment, fails partway in,
+  falls back to Blob, Blob is fmp4 and won't play. Latency to first
+  frame = infinite. **Broken.**
+
+So we shipped a `localStorage.sendie_wp_transmux=1` flag (off by default)
+that re-enables transmux for testing without further code changes, and
+left the rest of the pipeline intact.
+
+---
+
+## Alternatives for future progressive-playback attempts
+
+Now that we've proven the "transmux on host, MSE on receiver" path is
+brittle, here are the realistic alternatives ranked by likelihood-of-
+working-out:
+
+### 1. Fix the existing MSE pipeline outside Sendie first
+
+**Effort:** 1-2 days of focused debugging.
+**Risk:** medium. We may discover mp4box's output is inherently
+incompatible with Chromium's MSE in some way and pivot to a
+different transmuxer.
+
+Build a minimal repro page (no Sendie code, just `mp4box.js` ->
+`MediaSource` in HTML) that reads any chosen mp4 and tries to play
+it via MSE. Use `chrome://media-internals/` to capture the real
+error. Likely culprits to investigate:
+
+- mp4box defaults to `rapAlignement: true` but with `nbSamples: 60`,
+  the alignment may not actually find a RAP for non-keyframe-frequent
+  inputs. Try `rapAlignement: false` to confirm.
+- mp4box's tfdt timestamps may not be monotonic across track
+  fragmentation boundaries when audio and video have different sample
+  durations.
+- Some files have edit lists (`elst` in tkhd) that mp4box copies into
+  the moov but MSE doesn't honor consistently.
+
+Decision tree from minimal repro:
+- Plays fine standalone -> Sendie integration is wrong (race? buffer
+  size? wrong appendBuffer order?).
+- Same SourceBuffer error standalone -> mp4box's output is wrong; pivot
+  to alternative transmuxer.
+
+### 2. Switch to mp4-muxer (or similar)
+
+**Effort:** 2-3 days.
+**Bundle:** ~40 KB gzipped (vs mp4box's 35 KB; comparable).
+
+`mp4-muxer` is a newer pure-JS muxer, much smaller and simpler than
+mp4box.js. It's primarily a muxer (write-only) so we'd combine it with
+a small parser for the input. Or use `gpu-mp4` which is a complete
+parse-and-mux library aimed at fmp4 specifically.
+
+Other candidates worth surveying: `webm-muxer` (WebM only, but always
+streamable), `fmp4-muxer`, the demux/mux pair from `shaka-player`.
+
+### 3. WebCodecs + custom muxer
+
+**Effort:** 1-2 weeks.
+**Risk:** high. Edge cases (encrypted samples, edit lists, multi-track
+sync) are real work to get right.
+
+`VideoDecoder` + `VideoEncoder` are now stable in Chrome 117+ and
+Firefox 130+. We could:
+
+1. Demux the input mp4 ourselves with a small parser (mp4box's
+   `ISOFile` is ~150 KB minified but pure-parse mode is much smaller).
+2. Decode each sample to `VideoFrame` / `AudioData`.
+3. Re-encode? Or pass-through with a hand-rolled fmp4 muxer?
+
+The pass-through path is interesting because it avoids re-encode CPU
+cost. Hand-rolling an fmp4 muxer is the part that's months of work.
+
+Probably not worth doing; option 1 (debug the existing pipeline) or
+option 4 (skip transmux entirely) are more pragmatic.
+
+### 4. Skip transmux; use byte-range "P2P streaming" via Service Worker
+
+**Effort:** 4-6 days.
+**Risk:** medium-high. Service Worker glue is gnarly but well-trodden.
+
+This is the approach we sketched in the original v2 doc and never
+built. Recap:
+
+- Host has the original mp4 file on disk.
+- Receiver creates a `<video>` with `src` pointing to a synthetic
+  URL handled by a Service Worker.
+- When `<video>` issues range fetches against that URL (which it
+  always does for native mp4 playback on Chromium), the Service
+  Worker sends a `wp-range-request { start, end }` over the data
+  channel to the host.
+- Host slices the file (`File.slice(start, end).arrayBuffer()`) and
+  sends the bytes back as `wp-range-response`.
+- Service Worker fulfills the original fetch with those bytes.
+
+Why this could work where mp4box failed: **the browser's own demuxer
+parses the file**. If the browser would play the file from a normal
+HTTP server, it will play it from us. We never touch the bytes
+semantically. mp4 / mov / mkv / webm all just work.
+
+Pros over transmux:
+- No transmux step at all; works for any container the browser plays.
+- Receivers can scrub independently (the browser fetches new ranges
+  on seek; we forward those range requests).
+- Caches naturally: the Service Worker `Cache` API stores chunks the
+  receiver has already fetched, so re-watching scenes doesn't
+  re-spend host bandwidth.
+
+Cons:
+- 5-receiver mesh = 5x the host bandwidth vs the current "send once"
+  forward. Cache helps but doesn't eliminate.
+- Latency on every seek: receiver issues a range request, waits for
+  the round-trip. Could add 200-500 ms to scrubbing. Mitigation:
+  receiver-side prefetch (request the next 10 MB ahead of playhead).
+- Service Worker registration UX: requires the SW be registered
+  before the first range request, which means a one-time cold-start
+  cost.
+
+The Service Worker side has precedent: StreamSaver does exactly this
+(SW-as-fake-server) and we already vendor it.
+
+### 5. Send the file twice: original + fmp4
+
+**Effort:** ~2 days on top of #1 working.
+**Risk:** low (pure plumbing).
+
+Combination strategy: host sends the original mp4 (for the Blob
+fallback) AND, in parallel, an fmp4 stream (for MSE progressive).
+Receiver tries MSE; if it fails, the parallel original mp4 is already
+landing and Blob fallback can play it.
+
+Cost: doubles host upload bandwidth. Probably a non-starter for
+bandwidth-conscious users but acceptable for short clips.
+
+### 6. Pure server-side transmux (rejected, repeat for emphasis)
+
+We documented this in the original research and rejected it. Now that
+we've burned cycles on the client-side path, the temptation to
+"just do it server-side" returns. Restate the rejections:
+
+- Bytes flow through our server -> we stop being mesh-only.
+- We hold the file on disk while transmuxing -> storage cost.
+- Copyright targets us instead of the user.
+- Bandwidth cost shifts from peers' uplink to our egress.
+
+If we wanted streaming-service economics, we'd build a streaming
+service. We don't. **Stays rejected.**
+
+### 7. Don't ship progressive at all
+
+**Effort:** zero (this is the current state).
+
+The real question is: how often does a watch-party host pick a 1+ GB
+file? The C1 wait-for-receipt path is honestly fine for files <200 MB
+on a typical home uplink (8-30 seconds). If most usage is short clips,
+progressive playback is a polish feature, not a core one.
+
+We could just leave it disabled, document the file-size sweet spot
+in the UI, and move on.
+
+---
+
+## Recommendation
+
+The immediate-future path that's most likely to pay off:
+
+1. Spend a day on a minimal-repro HTML page reproducing the
+   SourceBuffer error outside Sendie. Use `chrome://media-internals/`
+   to get the real error. (Option 1 above.)
+2. If mp4box's output is the problem, evaluate `mp4-muxer` or a thin
+   custom shim. (Option 2.)
+3. If MSE itself is the problem (e.g. some Chromium quirk), seriously
+   consider Option 4 (Service Worker byte-range proxy) as a more
+   robust path that avoids the entire MSE pipeline.
+
+The user-perceived improvement from "wait 30 s for full transfer"
+to "play in 2 s" is real, but not worth shipping a broken receiver
+to chase. Stay disabled until one of the above paths produces
+something that actually plays in dogfooding.
