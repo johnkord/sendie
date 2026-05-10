@@ -1012,6 +1012,11 @@ class WatchPartyService {
     let cancelled = false;
     let lastReportedMediaTime = -1;
     let lastReportSentAt = 0;
+    // Cooldown after a hard seek. Without this, the loop hard-seeks
+    // every frame because buffering keeps mediaTime frozen while
+    // 'expected' advances. 800 ms is enough for most decoders to
+    // resume playback after a seek.
+    let seekCooldownUntil = 0;
     // rVFC support detection. Safari 16.4+, Chrome 83+, Firefox 132+.
     type FrameMeta = { mediaTime: number };
     type RVFCEl = HTMLVideoElement & {
@@ -1037,21 +1042,36 @@ class WatchPartyService {
 
       const drift = frameMediaTime - expected;
 
-      if (Math.abs(drift) >= HARD_DRIFT_S) {
-        // Hard seek. Only do it when we are within seekable range; if
-        // the user is buffering, the seek will fail loudly and we let
-        // the next iteration retry.
+      // Skip correction entirely while we're not actually able to
+      // play forward; readyState < HAVE_FUTURE_DATA (3) means decoder
+      // is mid-buffering. Measuring drift here is meaningless and
+      // applying corrections feeds the buffering loop.
+      const canMeasure = el.readyState >= 3;
+      const inSeekCooldown = localNow * 1000 < seekCooldownUntil;
+
+      if (canMeasure && !inSeekCooldown && Math.abs(drift) >= HARD_DRIFT_S) {
+        // Hard seek. Pin a cooldown so we don't immediately re-seek
+        // before the decoder can resume playback.
         try {
           el.currentTime = Math.max(0, expected);
+          seekCooldownUntil = localNow * 1000 + 800;
         } catch {
           // ignore
         }
+        // Reset to host rate; rate nudges from before the seek would
+        // compound otherwise.
         if (el.playbackRate !== tl.playbackRate) el.playbackRate = tl.playbackRate;
-      } else if (Math.abs(drift) >= SOFT_DRIFT_S) {
-        // Rate nudge. Sign(drift) > 0 means we are ahead -> slow down.
+      } else if (canMeasure && !inSeekCooldown && Math.abs(drift) >= SOFT_DRIFT_S) {
+        // Rate nudge. Critically: compute the target as host_rate ±
+        // delta, NOT current_rate * (1 ± delta). Multiplying by the
+        // current rate every frame at 60 Hz compounds: a few seconds
+        // of being 'ahead' would drop the rate from 1.0 to 0.6, the
+        // video falls behind, jumps to 1.65, etc, producing the
+        // sawtooth you see as choppiness.
         const target = tl.playbackRate * (1 - RATE_NUDGE * Math.sign(drift));
-        if (Math.abs(el.playbackRate - target) > 0.001) el.playbackRate = target;
-      } else if (el.playbackRate !== tl.playbackRate) {
+        if (Math.abs(el.playbackRate - target) > 0.005) el.playbackRate = target;
+      } else if (canMeasure && Math.abs(el.playbackRate - tl.playbackRate) > 0.005) {
+        // In sync; restore host rate exactly.
         el.playbackRate = tl.playbackRate;
       }
 

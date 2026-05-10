@@ -291,6 +291,114 @@ since C delivers a strictly better experience for almost every
 case. We keep Mode A (BYO local file) as a niche escape hatch for
 peers who already have the file and want to skip the transfer.
 
+## 2.8. Smooth playback: why the receiver was choppy and how we fixed it
+
+After Mode C shipped, the host's playback was smooth but the
+receiver played choppy: stuttering, occasional frame freezes,
+audio glitches. The receiver was playing from a fully-received
+local Blob URL so the network was not the bottleneck. The
+choppiness was self-inflicted by the drift correction loop. Three
+distinct bugs, each found by tracing the actual frame-by-frame
+behavior:
+
+### Bug 1: rate-nudge compounds at 60 Hz
+
+The original loop:
+```
+target = el.playbackRate * (1 - RATE_NUDGE * sign(drift))
+el.playbackRate = target
+```
+
+`requestVideoFrameCallback` fires at the rendered-frame rate
+(typically 60 Hz). At that rate, multiplying the current rate by
+0.95 every tick drops the rate from 1.0 to ~0.05 in one second.
+Result: the receiver instantly stalls to a crawl, falls behind,
+the next nudge multiplies *that* rate by 1.05 repeatedly until
+it's playing at 20x, the player buffers, falls behind again, ad
+nauseam. Sawtooth around the host's position with massive
+overshoot.
+
+Fix: compute the target relative to the **host's** rate, not the
+current rate. Single nudge of 5% in the direction of error,
+clamped to `host_rate * 1.05` or `host_rate * 0.95`. Never
+compounds.
+
+### Bug 2: no cooldown after a hard seek
+
+When drift exceeds the hard threshold (1 s), we hard-seek to the
+expected position. But seeking triggers a buffering pause; during
+the pause `mediaTime` is frozen at the seeked position while
+`expected` keeps advancing because wall-clock time is. So next
+tick, drift is still > 1 s, we seek again. Result: rapid-fire
+seeks, the player never escapes buffering.
+
+Fix: after a hard seek, ignore drift for 800 ms while the decoder
+recovers. 800 ms is empirically enough for most consumer hardware
+to resume playback; longer is fine, shorter risks stuttering.
+
+### Bug 3: drift correction during decoder buffering
+
+`HTMLMediaElement.readyState < HAVE_FUTURE_DATA (3)` means the
+decoder cannot produce the next frame yet. Measuring drift here
+gives a meaningless number (mediaTime hasn't advanced because the
+decoder is paused) and applying any correction (rate nudge or
+seek) feeds the buffering cycle.
+
+Fix: skip the correction entirely while readyState < 3. Let the
+decoder finish buffering, then resume drift correction.
+
+### Why simply "remove drift correction" isn't enough
+
+You might wonder if the right answer is just to disable drift
+correction altogether after the initial sync. It almost is. But
+clock skew between the host and follower's quartz oscillators is
+real (typically 30 to 100 ppm, so 0.18 s to 0.6 s of drift per
+hour). For a 2 hour movie, that's enough to break sync without
+correction. We need the loop, just done correctly.
+
+A future improvement is to use the receiver's `<video>` audio
+clock as the reference (the audio hardware's word clock is what
+ultimately drives playback) and only correct when the audio clock
+diverges from the host's anchor. That's more accurate than the
+loop as written but complex to implement correctly. Filed as
+follow-up, not blocking smooth playback today.
+
+### Alternative approaches considered
+
+We looked at several other mechanisms for smooth synced playback
+on the receiver before settling on "fix the drift loop":
+
+1. **Disable drift correction, accept clock skew.** Reasonable for
+   short clips but breaks for movies. Might enable as a "casual
+   mode" flag.
+
+2. **Audio-clock-driven loop with WebAudio.** Pipe the receiver's
+   decoded audio into an `AudioContext` graph and reschedule sync
+   off `audioCtx.currentTime` and `outputLatency`. This is what
+   pro tools (Resolume, Mixxx) do for sample-accurate sync. Two
+   downsides: substantial complexity, and `outputLatency` is not
+   reported on Firefox. Filed as future work.
+
+3. **Variant C2 (progressive playback via MSE).** Not relevant to
+   the choppiness problem; only relevant to time-to-first-frame.
+   Would not affect playback smoothness.
+
+4. **Frame-pacing via WebCodecs.** Decode the file ourselves with
+   `VideoDecoder`, paint to a canvas, and time each frame against
+   the host's anchor explicitly. This is what the original WebRTC
+   `RTCRtpReceiver` insertable-streams pipeline does internally
+   for jitter-free playback. Massively more complex to implement.
+   Realistic for a v3 if we want broadcast-grade sync; overkill
+   for the watch-party use case.
+
+5. **CMAF-LL chunked streaming + DASH-LL.** What HBO Max and
+   YouTube use for low-latency live. Not relevant: they're solving
+   network-side jitter, not local-clock-skew.
+
+Our fix hits all three causes (compounding rate, missing seek
+cooldown, corrections during buffering) with about 20 lines of
+code in the existing drift loop. No new APIs, no new dependencies.
+
 ## 3. The sync algorithm
 
 Three layers, each with concrete tradeoffs.
