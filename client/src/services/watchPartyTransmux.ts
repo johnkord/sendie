@@ -226,10 +226,18 @@ export async function transmuxToFmp4(
 
     mp4boxfile.onReady = (info: MP4Info) => {
       if (aborted) return;
-      // Configure every track for segmentation. nbSamples ~ 1000 is
-      // mp4box's default and gives ~1-second fragments at 24-30 fps,
-      // which matches what fmp4 streaming services use.
-      mediaType = info.mime ?? 'video/mp4';
+      // Build the codec mime ourselves from track-level codec strings.
+      // info.mime decorates with non-standard params (profiles=)
+      // that MSE rejects, AND in some cases reports a different codec
+      // string than what the actual moov declares (which causes
+      // SourceBuffer.error mid-decode). Track-level info.tracks[i].codec
+      // is what mp4box parsed from the real boxes.
+      const codecs = info.tracks
+        .map((t) => t.codec)
+        .filter((c) => c && c.length > 0);
+      mediaType = codecs.length > 0
+        ? `video/mp4; codecs="${codecs.join(',')}"`
+        : (info.mime ?? 'video/mp4');
       for (const track of info.tracks) {
         // Smaller fragments = lower time-to-first-frame on the
         // receiver. nbSamples=60 is roughly 2 seconds of video at

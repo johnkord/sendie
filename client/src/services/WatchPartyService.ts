@@ -1457,16 +1457,41 @@ class WatchPartyService {
    * mp4box.js so receivers can do progressive playback via MSE. See
    * docs/transmuxing-research.md.
    *
+  /**
+   * Optional preflight pass on the host: if the file is plain mp4
+   * (not already fmp4 / webm), repackage it to fmp4 in memory using
+   * mp4box.js so receivers can do progressive playback via MSE. See
+   * docs/transmuxing-research.md.
+   *
    * Failures are non-fatal: any error logs and falls through to
    * forwarding the original bytes (still plays, just without
    * progressive playback).
+   *
+   * DISABLED BY DEFAULT (Sept 2026). We discovered via dogfooding
+   * that the transmuxed fmp4 Blob is NOT playable via direct <video>
+   * src= (the browser correctly rejects fmp4 as 'no supported
+   * source' since fmp4 needs MSE). Combined with intermittent
+   * SourceBuffer 'error' events on the MSE path that we haven't
+   * root-caused, the net effect is that transmux makes the receiver
+   * WORSE: original bytes would have played fine via the Blob
+   * fallback, but transmuxed bytes can't fall back at all. Until we
+   * either (a) pin the SourceBuffer error and prove MSE always
+   * works, or (b) keep both originals and fmp4 simultaneously, we
+   * keep transmux off so the simple Blob path stays reliable.
+   *
+   * Enable per-host by setting localStorage.sendie_wp_transmux=1.
    */
   private async runHostPrep(file: File): Promise<void> {
+    const enabled = (() => {
+      try { return localStorage.getItem('sendie_wp_transmux') === '1'; }
+      catch { return false; }
+    })();
+    if (!enabled) {
+      console.log('[watch-party] transmux disabled (set localStorage.sendie_wp_transmux=1 to re-enable for testing)');
+      return;
+    }
     try {
       const { classifyForTransmux, transmuxToFmp4 } = await import('./watchPartyTransmux');
-      // Always run the classify check; transmux is sub-second on typical
-      // dogfooding files. The earlier 5 MB floor was hiding the feature
-      // entirely for the small clips most testing actually uses.
       const decision = await classifyForTransmux(file);
       console.log('[watch-party] host transmux decision:', decision, 'size=', file.size, 'type=', file.type);
       if (decision !== 'transmux') return;
@@ -1480,9 +1505,6 @@ class WatchPartyService {
         this.emitState();
       });
       console.log('[watch-party] host transmux done; bytes=', blob.size, 'mime=', mediaType);
-      // Replace forward source with the transmuxed Blob. Receivers
-      // see the new mediaType (fmp4 mime) in wp-file-start, sniff
-      // for mvex, and engage MSE.
       this.forwardSourceFile = new File([blob], file.name, { type: mediaType });
     } catch (err) {
       console.warn('[watch-party] host transmux failed; forwarding original bytes:', err);
