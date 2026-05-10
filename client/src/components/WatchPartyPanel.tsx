@@ -281,7 +281,15 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
       setObjectUrl(state.playbackUrl);
       return;
     }
-    if (!state.localFile) return;
+    if (!state.localFile) {
+      // MSE was torn down (mid-stream failure) and the assembled
+      // Blob isn't ready yet. Drop the URL and clear any decode
+      // error so the panel cleanly reverts to the 'receiving' UI
+      // until file-end binds a real Blob URL.
+      setObjectUrl(null);
+      setDecodeError(null);
+      return;
+    }
     const url = URL.createObjectURL(state.localFile);
     setObjectUrl(url);
     return () => URL.revokeObjectURL(url);

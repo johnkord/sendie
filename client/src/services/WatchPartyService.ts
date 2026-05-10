@@ -1671,7 +1671,7 @@ class WatchPartyService {
       const failsafe = window.setTimeout(() => {
         if (!this.mseSourceBuffer && !this.mseFailed) {
           console.warn('[watch-party] MSE sourceopen never fired; falling back to Blob');
-          this.mseFailed = true;
+          this.markMseFailed();
         }
       }, 5000);
       this.mse.addEventListener('sourceopen', () => {
@@ -1683,13 +1683,13 @@ class WatchPartyService {
           sb.addEventListener('updateend', () => this.flushMseQueue());
           sb.addEventListener('error', () => {
             console.warn('[watch-party] SourceBuffer error; falling back to Blob');
-            this.mseFailed = true;
+            this.markMseFailed();
           });
           this.mseSourceBuffer = sb;
           this.flushMseQueue();
         } catch (err) {
           console.warn('[watch-party] addSourceBuffer threw; falling back:', err);
-          this.mseFailed = true;
+          this.markMseFailed();
         }
       }, { once: true });
       // Expose the MSE URL so the UI binds <video src=this>.
@@ -1697,8 +1697,7 @@ class WatchPartyService {
       this.emitState();
     } catch (err) {
       console.warn('[watch-party] MSE setup failed; using Blob fallback:', err);
-      this.mseFailed = true;
-      this.tearDownMse();
+      this.markMseFailed();
     }
   }
 
@@ -1712,7 +1711,26 @@ class WatchPartyService {
       sb.appendBuffer(next);
     } catch (err) {
       console.warn('[watch-party] appendBuffer failed; falling back to Blob:', err);
-      this.mseFailed = true;
+      this.markMseFailed();
+    }
+  }
+
+  /**
+   * Tear down a partially-engaged MSE pipeline mid-stream and revert
+   * the UI to 'still receiving' state. Caller has already set or
+   * will set this.mseFailed = true. Without this, the receiver's
+   * <video> stays bound to the broken MediaSource URL and shows a
+   * decode error until file-end finally binds the Blob URL.
+   */
+  private markMseFailed(): void {
+    this.mseFailed = true;
+    this.tearDownMse();
+    // Drop the broken URL so the panel stops showing the
+    // 'streaming progressively' status and goes back to the
+    // 'receiving file' progress bar until full receipt.
+    if (this.state.playbackUrl) {
+      this.state = { ...this.state, playbackUrl: null };
+      this.emitState();
     }
   }
 
@@ -1844,6 +1862,17 @@ const MSE_CODEC_CANDIDATES_WEBM = [
 
 function pickMseCodec(mediaType: string): string | null {
   if (typeof MediaSource === 'undefined') return null;
+  // Prefer the exact mime the host announced if it carries an explicit
+  // codecs= parameter. After our mp4box transmux, the host sends the
+  // composite mime mp4box produced (e.g. 'video/mp4; codecs="avc1.640028,mp4a.40.2"')
+  // which is precisely what addSourceBuffer wants. Guessing from a
+  // hardcoded list misses unusual codec profiles.
+  if (mediaType.includes('codecs=')) {
+    const direct = mediaType.replace(/^\s*([^;]+);\s*/, '$1; ');
+    try {
+      if (MediaSource.isTypeSupported(direct)) return direct;
+    } catch { /* fall through to candidate list */ }
+  }
   const candidates = mediaType.includes('webm')
     ? MSE_CODEC_CANDIDATES_WEBM
     : MSE_CODEC_CANDIDATES_MP4;

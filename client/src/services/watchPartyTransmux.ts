@@ -231,7 +231,13 @@ export async function transmuxToFmp4(
       // which matches what fmp4 streaming services use.
       mediaType = info.mime ?? 'video/mp4';
       for (const track of info.tracks) {
-        mp4boxfile.setSegmentOptions(track.id, null, { nbSamples: 1000 });
+        // Smaller fragments = lower time-to-first-frame on the
+        // receiver. nbSamples=60 is roughly 2 seconds of video at
+        // 30 fps, or 60-something audio frames; receiver can start
+        // playing after the first fragment lands. mp4box's default
+        // is 1000 (~33 s fragments) which would defeat the whole
+        // point of progressive playback.
+        mp4boxfile.setSegmentOptions(track.id, null, { nbSamples: 60 });
       }
       const initSegs = mp4boxfile.initializeSegmentation();
       for (const seg of initSegs) {
