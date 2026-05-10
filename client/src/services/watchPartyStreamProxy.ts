@@ -30,8 +30,8 @@
  * for the lifetime of the watch party.
  */
 
-const SW_URL = '/wp-stream/sw.js';
-const SW_SCOPE = '/wp-stream/';
+const SW_URL = '/wp-stream-sw.js';
+const SW_SCOPE = '/';
 
 class WatchPartyStreamProxy {
   private registrationPromise: Promise<ServiceWorker | null> | null = null;
