@@ -408,6 +408,54 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     }
   };
 
+  // Fullscreen toggle. Hosts can use the native <video> controls
+  // already, but followers have controls hidden to prevent
+  // independent scrubbing, so they need an explicit fullscreen
+  // affordance. We fullscreen the <video> directly (not its wrapper)
+  // so the browser's own minimal fullscreen UI handles exit, and so
+  // PiP / fullscreen are mutually exclusive as users expect.
+  const fsSupported = typeof document !== 'undefined'
+    && (document.fullscreenEnabled || (document as unknown as { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled);
+  const [inFullscreen, setInFullscreen] = useState(false);
+  useEffect(() => {
+    const onFsChange = () => {
+      const el = videoRef.current;
+      const current = document.fullscreenElement
+        ?? (document as unknown as { webkitFullscreenElement?: Element | null }).webkitFullscreenElement
+        ?? null;
+      setInFullscreen(!!el && current === el);
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+    };
+  }, []);
+  const handleFullscreen = async () => {
+    const el = videoRef.current;
+    if (!el) return;
+    try {
+      if (inFullscreen) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else (document as unknown as { webkitExitFullscreen?: () => void }).webkitExitFullscreen?.();
+      } else {
+        // Safari iOS only supports webkitEnterFullscreen on the
+        // <video> element itself, not the standard fullscreen API.
+        type FsEl = HTMLVideoElement & {
+          webkitEnterFullscreen?: () => void;
+          webkitRequestFullscreen?: () => Promise<void>;
+        };
+        const v = el as FsEl;
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (v.webkitRequestFullscreen) await v.webkitRequestFullscreen();
+        else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+      }
+    } catch (err) {
+      console.warn('[watch-party] fullscreen request failed:', err);
+    }
+  };
+
   // Render readiness summary: ready / total accepted (excluding idle).
   const readyCount = Array.from(peers.values()).filter((p) => p.state === 'ready').length;
   const totalCount = peers.size;
@@ -436,6 +484,15 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
               title={inPip ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (pop video into a floating window)'}
             >
               {inPip ? '⧉ Exit PiP' : '⧉ PiP'}
+            </button>
+          )}
+          {fsSupported && (
+            <button
+              onClick={handleFullscreen}
+              className="px-2 py-1 rounded text-xs text-slate-300 hover:text-slate-100 hover:bg-white/5 transition-colors"
+              title={inFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            >
+              {inFullscreen ? '⤡ Exit' : '⤢ Fullscreen'}
             </button>
           )}
           <button
