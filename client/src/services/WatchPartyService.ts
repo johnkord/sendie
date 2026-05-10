@@ -67,7 +67,14 @@ const OFFSET_WINDOW = 9;
 // fudge factor for jittery links.
 const STALE_TIMELINE_MS = TIMELINE_HEARTBEAT_MS * 3 + 1000;
 
+// Encoder-fanout cap for stream mode. The host runs one WebRTC encoder
+// per peer; matches the screen-share cap so the same hardware ceiling
+// applies. Above this we refuse to start in stream mode and suggest
+// local-file mode instead.
+const MAX_STREAM_PEERS = 4;
+
 export type WatchPartyRole = 'host' | 'follower' | 'idle';
+export type WatchPartyMode = 'local' | 'stream';
 
 export interface WatchPartyState {
   // Stable id assigned at session start by the host. Followers ignore
@@ -75,12 +82,20 @@ export interface WatchPartyState {
   // session whose stragglers are still in the air).
   sessionId: string | null;
   role: WatchPartyRole;
+  // Transport mode. 'local' = each peer plays from a local file and
+  // we sync timestamps. 'stream' = host streams rendered A/V to
+  // followers via WebRTC tracks (no clock sync needed).
+  mode: WatchPartyMode;
   hostPeerId: string | null;
   // Display-only metadata advertised by the host.
   mediaName: string | null;
   mediaDuration: number;
-  // The user's locally-loaded file. null until they pick one.
+  // The user's locally-loaded file (host or follower in local mode).
+  // null in stream mode for followers.
   localFile: File | null;
+  // Stream id the host advertised in stream mode. Followers use this
+  // to match incoming WebRTC tracks to this watch-party.
+  streamId: string | null;
   // Last-seen heartbeat info (followers only).
   lastTimelineAt: number;
   // Most recent error message surfaced for the UI; cleared on next
@@ -109,10 +124,12 @@ class WatchPartyService {
   private state: WatchPartyState = {
     sessionId: null,
     role: 'idle',
+    mode: 'local',
     hostPeerId: null,
     mediaName: null,
     mediaDuration: 0,
     localFile: null,
+    streamId: null,
     lastTimelineAt: 0,
     error: null,
   };
@@ -156,6 +173,24 @@ class WatchPartyService {
   // the video element.
   private lastTimeline: Extract<DataChannelMessage, { type: 'wp-timeline' }> | null = null;
 
+  // -------- Stream mode (Mode B) state --------
+
+  // Host: captureStream() output, retained so we can stop tracks on
+  // leave. The source <video> itself is owned by the UI (we don't
+  // need to remember it after wiring the stream).
+  private streamCapture: MediaStream | null = null;
+  // Host: object URL for the file. We own its lifecycle.
+  private streamSourceObjectUrl: string | null = null;
+
+  // Follower: incoming MediaStream from the host's RTC tracks. The UI
+  // subscribes to changes and binds it to <video srcObject>.
+  private remoteStream: MediaStream | null = null;
+  private remoteStreamSubscribers: Set<() => void> = new Set();
+  // Follower: pending tracks received before the wp-stream-start
+  // announcement landed (similar to ScreenShareService's pending
+  // buffer). Keyed by streamId. Swept on TTL or claim.
+  private pendingRemoteStreams: Map<string, MediaStream> = new Map();
+
   constructor() {
     multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
       if (typeof data !== 'string') return;
@@ -184,11 +219,52 @@ class WatchPartyService {
     // next heartbeat.
     multiPeerWebRTCService.on('onDataChannelOpen', (peerId) => {
       if (this.state.role === 'host' && this.state.sessionId) {
-        this.sendTimeline(peerId);
+        if (this.state.mode === 'stream') {
+          this.sendStreamStart(peerId);
+        } else {
+          this.sendTimeline(peerId);
+        }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
         this.broadcastPeerState();
       }
     });
+
+    // Stream-mode: receive WebRTC media tracks from the host.
+    // Pattern mirrors ScreenShareService: incoming track may arrive
+    // before or after the wp-stream-start announcement.
+    multiPeerWebRTCService.on('onTrack', (peerId, stream, _kind) => {
+      if (this.state.role === 'follower' && this.state.mode === 'stream'
+          && this.state.hostPeerId === peerId) {
+        // We are expecting this. Claim if it matches the announced
+        // streamId, or buffer briefly.
+        if (this.state.streamId && stream.id === this.state.streamId) {
+          this.remoteStream = stream;
+          this.notifyRemoteStream();
+          return;
+        }
+      }
+      // Buffer for a few seconds in case the announcement is in
+      // flight. Sweep TTL so non-watch-party tracks (camera, screen)
+      // don't pile up here.
+      this.pendingRemoteStreams.set(stream.id, stream);
+      setTimeout(() => this.pendingRemoteStreams.delete(stream.id), 5000);
+    });
+  }
+
+  /**
+   * Subscribe to remote-stream changes (stream-mode followers). The UI
+   * calls this and binds the stream to a <video srcObject> when the
+   * callback fires.
+   */
+  onRemoteStreamChanged(cb: () => void): () => void {
+    this.remoteStreamSubscribers.add(cb);
+    return () => { this.remoteStreamSubscribers.delete(cb); };
+  }
+
+  getRemoteStream(): MediaStream | null { return this.remoteStream; }
+
+  private notifyRemoteStream(): void {
+    for (const cb of this.remoteStreamSubscribers) cb();
   }
 
   on<K extends keyof WatchPartyEvents>(event: K, handler: WatchPartyEvents[K]): void {
@@ -232,20 +308,36 @@ class WatchPartyService {
    * via a file picker / drop) and start a new session. Broadcasts an
    * initial paused timeline at currentTime=0. Followers will see
    * 'host loaded movie X' and load their own file.
+   *
+   * @param mode  'local' (default) = each peer plays from a local copy
+   *              of the file; we sync timestamps. 'stream' = host
+   *              streams rendered A/V via WebRTC tracks; followers
+   *              receive without needing a local copy.
    */
-  async startAsHost(file: File): Promise<void> {
+  async startAsHost(file: File, mode: WatchPartyMode = 'local'): Promise<void> {
     if (this.state.role !== 'idle') {
       throw new Error('Already in a watch party. Leave first.');
+    }
+    if (mode === 'stream') {
+      const peerCount = this.connectedPeerCount();
+      if (peerCount > MAX_STREAM_PEERS) {
+        throw new Error(
+          `Stream mode supports up to ${MAX_STREAM_PEERS} peers (you have ${peerCount}). ` +
+          `Use local-file mode for larger rooms.`,
+        );
+      }
     }
     const sessionId = cryptoService.generateFileId();
     const myPeerId = this.getMyPeerId();
     this.state = {
       sessionId,
       role: 'host',
+      mode,
       hostPeerId: myPeerId,
       mediaName: file.name,
       mediaDuration: 0, // populated when the video metadata loads
       localFile: file,
+      streamId: null,
       lastTimelineAt: this.localMono(),
       error: null,
     };
@@ -256,9 +348,101 @@ class WatchPartyService {
     this.nextSeq = 0;
     this.emitState();
     this.emitPeers();
-    // Send initial timeline so followers know what's happening.
-    this.broadcastTimeline();
-    this.startHeartbeat();
+    if (mode === 'local') {
+      // Send initial timeline so followers know what's happening.
+      this.broadcastTimeline();
+      this.startHeartbeat();
+    }
+    // For stream mode: the UI must call attachStreamSourceElement() with
+    // the host's <video>. captureStream and the wp-stream-start
+    // announcement happen there, once we have an element to capture
+    // from.
+  }
+
+  /**
+   * Stream-mode: bind the host's <video> element. We call captureStream()
+   * on it and pipe every track into the existing WebRTC fanout, then
+   * announce wp-stream-start so followers can match the incoming tracks.
+   * Returns an unbind function the UI MUST call on unmount.
+   */
+  attachStreamSourceElement(el: HTMLVideoElement): () => void {
+    if (this.state.role !== 'host' || this.state.mode !== 'stream') {
+      return () => {};
+    }
+    type CaptureEl = HTMLVideoElement & {
+      captureStream?: () => MediaStream;
+      mozCaptureStream?: () => MediaStream;
+    };
+    const cEl = el as CaptureEl;
+    const capture = cEl.captureStream?.bind(cEl) ?? cEl.mozCaptureStream?.bind(cEl);
+    if (!capture) {
+      this.surfaceError('Streaming not supported in this browser; switch to local-file mode.');
+      return () => {};
+    }
+    // captureStream returns a live stream that gets tracks added as the
+    // element starts playing. We add them to the mesh as they appear.
+    const stream = capture();
+    this.streamCapture = stream;
+    this.state = { ...this.state, streamId: stream.id };
+    const wired = new Set<string>();
+    const wireTrack = (track: MediaStreamTrack) => {
+      if (wired.has(track.id)) return;
+      wired.add(track.id);
+      multiPeerWebRTCService.addLocalTrack(track, stream);
+    };
+    for (const t of stream.getTracks()) wireTrack(t);
+    stream.addEventListener('addtrack', (ev) => wireTrack(ev.track));
+    // Set duration when the element knows it.
+    const onLoadedMeta = () => {
+      this.state = { ...this.state, mediaDuration: el.duration || 0 };
+      this.emitState();
+      this.broadcastStreamStart();
+    };
+    el.addEventListener('loadedmetadata', onLoadedMeta);
+    this.emitState();
+    // Announce now so followers who already have a data channel can
+    // match incoming tracks immediately. We may re-announce once
+    // duration is known.
+    this.broadcastStreamStart();
+    return () => {
+      el.removeEventListener('loadedmetadata', onLoadedMeta);
+      // We do NOT stop the tracks here; leave() handles teardown so
+      // the host can unmount/remount the element (e.g. fullscreen
+      // toggle) without breaking the stream. If the user really wants
+      // to end, they call leave().
+    };
+  }
+
+  private broadcastStreamStart(): void {
+    if (this.state.role !== 'host' || this.state.mode !== 'stream') return;
+    if (!this.state.sessionId || !this.state.streamId) return;
+    const msg: DataChannelMessage = {
+      type: 'wp-stream-start',
+      sessionId: this.state.sessionId,
+      hostPeerId: this.state.hostPeerId ?? this.getMyPeerId(),
+      streamId: this.state.streamId,
+      mediaName: this.state.mediaName ?? '',
+      mediaDuration: this.state.mediaDuration,
+    };
+    multiPeerWebRTCService.broadcast(JSON.stringify(msg));
+  }
+
+  private sendStreamStart(peerId: string): void {
+    if (this.state.role !== 'host' || this.state.mode !== 'stream') return;
+    if (!this.state.sessionId || !this.state.streamId) return;
+    const msg: DataChannelMessage = {
+      type: 'wp-stream-start',
+      sessionId: this.state.sessionId,
+      hostPeerId: this.state.hostPeerId ?? this.getMyPeerId(),
+      streamId: this.state.streamId,
+      mediaName: this.state.mediaName ?? '',
+      mediaDuration: this.state.mediaDuration,
+    };
+    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
+  }
+
+  private connectedPeerCount(): number {
+    return multiPeerWebRTCService.getConnectedPeers().length;
   }
 
   /**
@@ -343,16 +527,30 @@ class WatchPartyService {
         sessionId: this.state.sessionId,
       } satisfies DataChannelMessage));
     }
+    // Tear down stream-mode tracks if any.
+    if (this.streamCapture) {
+      for (const track of this.streamCapture.getTracks()) {
+        try { multiPeerWebRTCService.removeLocalTrack(track); } catch { /* ignore */ }
+        try { track.stop(); } catch { /* ignore */ }
+      }
+      this.streamCapture = null;
+    }
+    if (this.streamSourceObjectUrl) {
+      URL.revokeObjectURL(this.streamSourceObjectUrl);
+      this.streamSourceObjectUrl = null;
+    }
     this.stopHeartbeat();
     this.stopStaleWatchdog();
     if (this.driftLoopCancel) { this.driftLoopCancel(); this.driftLoopCancel = null; }
     this.state = {
       sessionId: null,
       role: 'idle',
+      mode: 'local',
       hostPeerId: null,
       mediaName: null,
       mediaDuration: 0,
       localFile: null,
+      streamId: null,
       lastTimelineAt: 0,
       error: null,
     };
@@ -361,6 +559,8 @@ class WatchPartyService {
     this.lastTimeline = null;
     this.hostClockOffset = 0;
     this.videoEl = null;
+    this.remoteStream = null;
+    this.notifyRemoteStream();
     this.emitState();
     this.emitPeers();
   }
@@ -436,6 +636,7 @@ class WatchPartyService {
     playbackRate?: number;
   }): void {
     if (this.state.role !== 'host' || !this.state.sessionId) return;
+    if (this.state.mode === 'stream') return; // stream mode has no timeline
     const lookahead = opts?.lookahead ?? 0;
     const playing = opts?.playing ?? (this.videoEl ? !this.videoEl.paused : false);
     const anchorTime = opts?.anchorTimeOverride ?? this.videoEl?.currentTime ?? 0;
@@ -534,11 +735,46 @@ class WatchPartyService {
     switch (msg.type) {
       case 'wp-timeline': return this.handleTimeline(peerId, msg);
       case 'wp-peer-state': return this.handlePeerState(peerId, msg);
+      case 'wp-stream-start': return this.handleStreamStart(peerId, msg);
       case 'wp-end': return this.handleEnd(peerId, msg);
       case 'wp-host-request': return this.handleHostRequest(peerId, msg);
       case 'wp-host-grant': return this.handleHostGrant(peerId, msg);
       default: return;
     }
+  }
+
+  private handleStreamStart(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-stream-start' }>,
+  ): void {
+    // Hosts receiving their own message via echo (shouldn't happen but
+    // defensive): ignore.
+    if (this.state.role === 'host') return;
+    // Wrong session (stragglers from before).
+    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
+    // Discovery / refresh.
+    this.state = {
+      ...this.state,
+      sessionId: msg.sessionId,
+      role: 'follower',
+      mode: 'stream',
+      hostPeerId: msg.hostPeerId,
+      mediaName: msg.mediaName,
+      mediaDuration: msg.mediaDuration,
+      streamId: msg.streamId,
+      lastTimelineAt: this.localMono(),
+      error: null,
+    };
+    // If we already received the matching track in the pending buffer,
+    // promote it.
+    const pending = this.pendingRemoteStreams.get(msg.streamId);
+    if (pending) {
+      this.remoteStream = pending;
+      this.pendingRemoteStreams.delete(msg.streamId);
+      this.notifyRemoteStream();
+    }
+    this.emitState();
+    void peerId;
   }
 
   private handleTimeline(
@@ -552,6 +788,7 @@ class WatchPartyService {
         ...this.state,
         sessionId: msg.sessionId,
         role: 'follower',
+        mode: 'local',
         hostPeerId: msg.hostPeerId,
         mediaName: msg.mediaName,
         mediaDuration: msg.mediaDuration,

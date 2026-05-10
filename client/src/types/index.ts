@@ -168,6 +168,18 @@ export type DataChannelMessage =
   // would auto-grant.
   | { type: 'wp-host-request'; sessionId: string }
   | { type: 'wp-host-grant'; sessionId: string; newHostPeerId: string }
+  // Live-stream mode: host announces it is sharing the rendered output
+  // of a media element via WebRTC tracks (captureStream). Followers
+  // match incoming tracks against streamId. No clock-sync needed in
+  // this mode; RTP timestamps drive A/V sync.
+  | {
+      type: 'wp-stream-start';
+      sessionId: string;
+      hostPeerId: string;
+      streamId: string;
+      mediaName: string;
+      mediaDuration: number;
+    }
   // Host explicitly ends the session for everyone.
   | { type: 'wp-end'; sessionId: string };
 

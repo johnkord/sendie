@@ -81,6 +81,97 @@ Out of scope for v1:
 - Rebroadcasting one peer's decoded video to others (would defeat
   the "everyone has the file" optimization).
 
+## 2.5. Three transport modes (revised after v1 dogfooding)
+
+The original proposal collapsed the watch-party UX into a single
+mode: "everyone loads the same local file, we sync timestamps". We
+shipped that as v1 and it dogfooded poorly. The first thing every
+tester did was wonder why Sendie, a *file-transfer app*, expects
+the receivers to already have the bytes. The "BYO file" mode is
+useful but it cannot be the only mode. Three modes form a useful
+spectrum:
+
+### Mode A: BYO local file (v1, "everyone has the file")
+Each peer loads their own local copy via a file picker. Sendie
+synchronizes playback state only.
+
+- **Pros:** zero streaming bandwidth; perfect quality (the original
+  bytes); seek is instant on every peer; works for arbitrarily large
+  files; survives one peer's network hiccup since each peer owns
+  their playback.
+- **Cons:** the room must already have the file. Defeats Sendie's
+  central value prop. Subtle codec skew between encodes is invisible
+  until late in playback.
+- **When right:** geographically distant friend group rewatching
+  something most of them already own. Long sessions over flaky
+  links.
+
+### Mode B: Live stream from host (v1.5, this revision)
+Host renders the file in a hidden `<video>`, captures the rendered
+output via `HTMLMediaElement.captureStream()`, and pipes the
+resulting MediaStream into the existing WebRTC fanout (the same
+machinery `ScreenShareService` and `CameraService` use). Followers
+receive a real-time A/V track and render it with `srcObject`.
+
+- **Pros:** **zero setup for receivers**, no file picker, no codec
+  worries on the receiver side (the host's browser does the decode,
+  the wire is whatever the host's RTC encoder produces, typically
+  VP8 / VP9 / H.264 — all universally decodable). No clock-sync
+  layer needed: WebRTC's RTP timestamps already drive A/V sync.
+  Host's play / pause / seek manipulate the source element and the
+  followers see the result mirrored automatically (the captured
+  stream reflects the rendered output frame by frame).
+- **Cons:** re-encoding cost on the host (one encoder per peer in a
+  pure mesh; same ceiling as screen-share, capped at
+  `MAX_SCREEN_PEERS`). Quality is whatever WebRTC SVC negotiates,
+  not the original bitrate. Receiver cannot scrub independently
+  (any seek goes through host). Higher live bandwidth than the file
+  transfer would have used: 2 GB movie at 5 Mbps RTC fanout to 4
+  peers is 18 Mbps upstream from host vs the same 2 GB sent once
+  via file transfer.
+- **When right:** "let's start watching now" with a host who has
+  the file and friends who don't. Short clips. Casual viewing.
+
+### Mode C: Pre-share-then-watch (v2, "wait until everyone has it")
+Host kicks off a normal Sendie file transfer to every peer. The
+watch-party panel shows progress bars; the play button is disabled
+until all accepting peers report receipt. Then the room enters
+Mode A automatically (everyone has the file locally; we sync
+state only).
+
+- **Pros:** original quality on every peer; independent scrubbing
+  works; survives peer network blips; legitimately reuses Sendie's
+  best feature. The host doesn't burn an encoder while everyone
+  watches.
+- **Cons:** time-to-first-frame is the slowest peer's transfer
+  duration. A 2 GB movie over a 50 Mbps consumer uplink is six
+  minutes of waiting before anything plays. Storage: every peer
+  uses N gigabytes of OPFS / disk per movie watched.
+- **When right:** planned movie nights; people willing to wait
+  five minutes to get the optimal experience for two hours.
+
+### Tensions and the chosen default
+- **Quality vs latency to first frame.** B is instant, C is best.
+  A is in between (instant if the file is already on disk, useless
+  if not).
+- **Encoder load vs bandwidth.** B re-encodes once per receiver and
+  burns N x bitrate of host upstream. C uses Sendie's existing
+  flow-controlled file transfer, which is one-shot per-peer at
+  whatever the data channel sustains.
+- **Receiver autonomy.** A and C let receivers pause / scrub
+  independently (with a "rejoin host" button). B forces the host's
+  timeline.
+- **What the user understood Sendie to be.** B and C feel native to
+  Sendie ("we transfer files between peers"). A feels like Syncplay
+  bolted on, which is what the dogfooding test failed at.
+
+The UI defaults: when the host clicks "Start watch party" they pick
+which mode at start time. We recommend B for files under 500 MB and
+C for files over that threshold (transfer-time guess) but the user
+can override. A is a "quick join" option visible only when both
+the host and the joiner already have a file with the same name on
+disk; it stays an escape hatch, not the headline path.
+
 ## 3. The sync algorithm
 
 Three layers, each with concrete tradeoffs.
