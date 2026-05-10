@@ -37,7 +37,11 @@ import type { DataChannelMessage } from '../types';
 // 2 s is enough for follower drift to be corrected continuously without
 // flooding the data channel; on every state transition (play/pause/seek/
 // rate change) we send immediately regardless.
-const TIMELINE_HEARTBEAT_MS = 2000;
+// 1 s heartbeat. Drift can accumulate up to one heartbeat before
+// the next correction; 1 s is the largest interval that keeps the
+// receiver feeling 'in sync' subjectively. Smaller intervals burn
+// data-channel bandwidth without proportional benefit.
+const TIMELINE_HEARTBEAT_MS = 1000;
 
 // Lookahead in seconds for state transitions. The host schedules play
 // or seek at hostMono + this offset so the follower's drift loop has
@@ -53,8 +57,16 @@ const TRANSITION_LOOKAHEAD_S = 0.5;
 // Plex / Jellyfin / Syncplay use 50 ms / 1 s; we use 100 ms / 1 s so
 // brief voice-traffic blips don't trigger spurious nudges.
 const SOFT_DRIFT_S = 0.1;
-const HARD_DRIFT_S = 1.0;
-const RATE_NUDGE = 0.05;
+// 0.5 s used to be 1.0 s. With the smoother corrected drift loop
+// (no compounding rate nudge, seek cooldown, no correction during
+// buffering) hard seeks no longer thrash, so we can use them more
+// aggressively and keep receivers within half a second of host.
+const HARD_DRIFT_S = 0.5;
+// Maximum rate deviation from host_rate. We scale linearly with
+// drift magnitude so a 100 ms drift gives ~1% nudge while a 400 ms
+// drift gives the full 5%. Constant 5% on every drift size means
+// small drifts feel laggy to recover; proportional feels natural.
+const RATE_NUDGE_MAX = 0.05;
 
 // Rolling-median window for clock offset samples. Larger windows reject
 // outliers better but lag behind real clock changes; 9 is a good
@@ -735,7 +747,26 @@ class WatchPartyService {
     // Follower: start the drift loop. Use rVFC if available, rAF as
     // fallback (Safari < 16.4).
     const stop = this.startDriftLoop(el);
+    // One-shot initial sync: when the receiver's video first has
+    // enough data to play, hard-seek to the host's expected position
+    // immediately. Without this, the receiver starts at t=0 while
+    // the host is N seconds in (host plays during transfer time),
+    // and the drift loop has to wait for its hard threshold to fire.
+    // Doing the sync once here, deterministically, makes startup
+    // crisp.
+    const initialSync = () => {
+      const tl = this.lastTimeline;
+      if (!tl || !tl.playing) return;
+      const anchorMonoLocal = tl.anchorMono - this.hostClockOffset;
+      const elapsed = Math.max(0, this.localMono() - anchorMonoLocal);
+      const expected = tl.anchorTime + elapsed * tl.playbackRate;
+      if (Math.abs(el.currentTime - expected) > 0.5) {
+        try { el.currentTime = Math.max(0, expected); } catch { /* ignore */ }
+      }
+    };
+    el.addEventListener('canplay', initialSync, { once: true });
     return () => {
+      el.removeEventListener('canplay', initialSync);
       stop();
       this.videoEl = null;
     };
@@ -1062,13 +1093,15 @@ class WatchPartyService {
         // compound otherwise.
         if (el.playbackRate !== tl.playbackRate) el.playbackRate = tl.playbackRate;
       } else if (canMeasure && !inSeekCooldown && Math.abs(drift) >= SOFT_DRIFT_S) {
-        // Rate nudge. Critically: compute the target as host_rate ±
-        // delta, NOT current_rate * (1 ± delta). Multiplying by the
-        // current rate every frame at 60 Hz compounds: a few seconds
-        // of being 'ahead' would drop the rate from 1.0 to 0.6, the
-        // video falls behind, jumps to 1.65, etc, producing the
-        // sawtooth you see as choppiness.
-        const target = tl.playbackRate * (1 - RATE_NUDGE * Math.sign(drift));
+        // Rate nudge proportional to drift magnitude. A 100 ms drift
+        // (right at the soft threshold) gets ~1% nudge; a 400 ms
+        // drift hits the full 5% cap. Linear ramp between.
+        // Critically: target is host_rate +/- delta, not
+        // current_rate * (1 +/- delta), so we never compound across
+        // 60 Hz frame ticks.
+        const magnitude = Math.min(1, Math.abs(drift) / HARD_DRIFT_S);
+        const delta = RATE_NUDGE_MAX * magnitude;
+        const target = tl.playbackRate * (1 - delta * Math.sign(drift));
         if (Math.abs(el.playbackRate - target) > 0.005) el.playbackRate = target;
       } else if (canMeasure && Math.abs(el.playbackRate - tl.playbackRate) > 0.005) {
         // In sync; restore host rate exactly.
