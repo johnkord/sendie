@@ -396,6 +396,32 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
               </span>
             </button>
           )}
+          {/* Follower autoplay-fallback overlay: the drift loop calls
+              play() when the host says playing=true, but browsers
+              without prior Media Engagement deny autoplay-with-sound.
+              Surface a click-to-start button rather than failing
+              silently. Disappears as soon as we are no longer paused. */}
+          {!isHost && paused && !decodeError && (
+            <button
+              onClick={() => {
+                const el = videoRef.current;
+                if (!el) return;
+                el.play().catch(() => {
+                  // Final fallback: try muted (universally allowed) so
+                  // the user at least sees motion; they can unmute later.
+                  el.muted = true;
+                  el.play().catch(() => {});
+                });
+              }}
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white"
+            >
+              <span className="text-2xl">▶</span>
+              <span className="text-sm font-medium">Click to start watching</span>
+              <span className="text-[11px] text-slate-300">
+                Browser blocked autoplay until you click here.
+              </span>
+            </button>
+          )}
         </div>
       )}
       {isHost && state.mode === 'stream' && !decodeError && (
