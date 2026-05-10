@@ -844,21 +844,31 @@ soon as the first GOP is decodable.
 
 Hard parts:
 
-1. **The mp4 has to be fragmented.** Standard mp4 puts the `moov`
-   atom at the END of the file by default; without it, the
-   decoder cannot start. Two paths:
+1. **The mp4 has to be FRAGMENTED (fmp4 / CMAF), not just
+   moov-first.** This is the canonical MSE pitfall and we hit it
+   in v2 dogfooding. Regular mp4 (what every phone, OBS, ffmpeg
+   default, Premiere export produces) has one giant `mdat` and
+   `appendBuffer` rejects arbitrary slices. Three paths:
 
-   a) Pre-flight on the host: parse the mp4 header. If `moov` is
-      at the end, run a "fast-start" pass with mp4box.js (WASM,
-      ~400 KB) to rewrite. Adds a few seconds of host-side prep
-      but only on first send.
+   a) Pre-flight transmux on the host: dynamic-import mp4box.js
+      (~340 KB gzipped, WASM) and rewrite plain mp4 to fmp4 in
+      memory before sending. No re-encode, just a container
+      remux. ~5 to 30 seconds host CPU per first-time file;
+      memory-bound at ~1.5 GB input ceiling. Recommended.
 
-   b) Require fragmented input. Reject regular mp4 with a clear
-      message: "this file isn't streamable; falling back to
-      C1 (waiting for full transfer)."
+   b) Require fmp4 input. Reject regular mp4 with a clear
+      message; user runs `ffmpeg -movflags +faststart+frag_keyframe`
+      themselves. Free for us, painful for the user. Currently
+      shipping (the receiver falls back to C1 wait-for-receipt).
 
-   We'll start with (b) (no new dependency) and add (a) as a
-   follow-up if users complain.
+   c) Byte-range peering: receiver's `<video>` requests ranges,
+      a Service Worker translates those into data-channel requests
+      to the host. Works for any container the browser plays
+      directly. v3 candidate.
+
+   See [docs/transmuxing-research.md](transmuxing-research.md) for
+   the full analysis (mp4box.js vs mux.js vs FFmpeg.wasm vs custom
+   muxer vs server-side, with bundle / memory / speed costs).
 
 2. **Codec mime detection.** Need the exact codec string for
    `MediaSource.addSourceBuffer(...)`. mp4box.js can extract
