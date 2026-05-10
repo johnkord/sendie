@@ -124,7 +124,52 @@ export type DataChannelMessage =
   // Screen-share state. streamId lets the receiver match an incoming
   // video track to the sender's intent (camera vs screen) since both
   // arrive as kind=video.
-  | { type: 'screen-state'; sharing: boolean; streamId?: string };
+  | { type: 'screen-state'; sharing: boolean; streamId?: string }
+  // Watch-party (synced media playback). See
+  // docs/synced-media-playback-proposal.md for the full design.
+  // 'wp-timeline' is the heartbeat carrying the host's authoritative
+  // playback state. anchorMono is the host's AudioContext.currentTime
+  // (in seconds) at the moment of send, plus an optional lookahead for
+  // play/seek transitions; followers compute their own currentTime as
+  //   anchorTime + (hostNow - anchorMono) * playbackRate when playing.
+  // hostMono is the host's clock at send time, used for offset
+  // estimation (alongside RTCStatsReport.currentRoundTripTime) without
+  // a separate ping protocol.
+  | {
+      type: 'wp-timeline';
+      seq: number;
+      hostPeerId: string;
+      sessionId: string;
+      playing: boolean;
+      anchorMono: number;
+      anchorTime: number;
+      playbackRate: number;
+      hostMono: number;
+      // Display-only metadata; receivers use it to confirm 'this is the
+      // movie I have' and show a label. We don't enforce a hash match
+      // because users often have the same movie with different bitrates
+      // / encodes; trust the user.
+      mediaName: string;
+      mediaDuration: number; // seconds, or 0 if unknown
+    }
+  // Follower has loaded a local file and is ready, or is buffering, or
+  // has left the watch party.
+  | {
+      type: 'wp-peer-state';
+      sessionId: string;
+      // 'idle' = no file loaded; 'ready' = file loaded, can play;
+      // 'buffering' = playback temporarily stalled (readyState briefly
+      // < HAVE_FUTURE_DATA for >2s).
+      state: 'idle' | 'ready' | 'buffering';
+      mediaTime?: number;  // current playback position, for seekbar dots
+    }
+  // Anyone can request to take over hosting; current host grants or
+  // ignores. In v1 the host approves manually; democratic mode (v2)
+  // would auto-grant.
+  | { type: 'wp-host-request'; sessionId: string }
+  | { type: 'wp-host-grant'; sessionId: string; newHostPeerId: string }
+  // Host explicitly ends the session for everyone.
+  | { type: 'wp-end'; sessionId: string };
 
 // Crypto Types
 export interface KeyPair {

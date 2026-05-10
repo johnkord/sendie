@@ -10,6 +10,7 @@ import {
   voiceService,
   cameraService,
   screenShareService,
+  watchPartyService,
   chatService
 } from '../services';
 import { 
@@ -25,6 +26,7 @@ import {
   RemoteVideos,
   ScreenShareControls,
   RemoteScreens,
+  WatchPartyPanel,
   ChatPanel,
   Footer 
 } from '../components';
@@ -307,6 +309,7 @@ export default function MultiPeerSessionPage() {
       voiceService.reset();
       cameraService.reset();
     screenShareService.reset();
+    watchPartyService.reset();
       chatService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
@@ -494,6 +497,7 @@ export default function MultiPeerSessionPage() {
     voiceService.reset();
     cameraService.reset();
     screenShareService.reset();
+    watchPartyService.reset();
     chatService.reset();
     clearPeers();
     signalingService.disconnect();
@@ -606,6 +610,7 @@ export default function MultiPeerSessionPage() {
     voiceService.reset();
     cameraService.reset();
     screenShareService.reset();
+    watchPartyService.reset();
     chatService.reset();
     clearPeers();
     clearQueuedFiles();
@@ -881,6 +886,11 @@ export default function MultiPeerSessionPage() {
                 </div>
               </section>
             )}
+
+            {/* Watch party: synced playback for a media file each peer
+                already has locally. See
+                docs/synced-media-playback-proposal.md. */}
+            {peers.size > 0 && <WatchPartyPanel />}
 
             {/* Chat lives at the bottom of main; expanded panel is
                 tall enough to be useful without scrolling away from

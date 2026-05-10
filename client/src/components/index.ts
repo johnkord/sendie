@@ -11,5 +11,6 @@ export { CameraControls } from './CameraControls';
 export { RemoteVideos } from './RemoteVideos';
 export { ScreenShareControls } from './ScreenShareControls';
 export { RemoteScreens } from './RemoteScreens';
+export { WatchPartyPanel } from './WatchPartyPanel';
 export { ChatPanel } from './ChatPanel';
 export { default as Footer } from './Footer';

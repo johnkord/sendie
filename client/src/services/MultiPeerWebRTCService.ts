@@ -840,6 +840,39 @@ export class MultiPeerWebRTCService {
   }
 
   /**
+   * Estimate the current round-trip time to a peer in seconds, or null
+   * if no fresh sample is available. Pulls from the standard
+   * RTCStatsReport (candidate-pair currentRoundTripTime), which the
+   * underlying RTCPeerConnection maintains automatically while the
+   * connection is active. Used by the watch-party clock-sync code so
+   * we don't have to roll our own ping protocol.
+   *
+   * Returns null on browsers / setups where the stat is unavailable;
+   * callers should fall back to a default (e.g. 100 ms) in that case.
+   */
+  async getCurrentRoundTripTime(peerId: string): Promise<number | null> {
+    const peerInfo = this.peerConnections.get(peerId);
+    if (!peerInfo) return null;
+    try {
+      const stats = await peerInfo.connection.getStats();
+      let rtt: number | null = null;
+      // Prefer a 'nominated' candidate pair if present (the active
+      // path); otherwise take the first pair with a sample.
+      stats.forEach((report) => {
+        if (report.type !== 'candidate-pair') return;
+        const pair = report as RTCIceCandidatePairStats & { nominated?: boolean };
+        if (typeof pair.currentRoundTripTime !== 'number') return;
+        if (rtt === null || pair.nominated) {
+          rtt = pair.currentRoundTripTime;
+        }
+      });
+      return rtt;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Get buffered amount for a specific peer's data channel
    */
   getBufferedAmount(peerId: string): number {

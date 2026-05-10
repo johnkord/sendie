@@ -7,6 +7,8 @@ export type { VerificationResult } from './VerificationService';
 export { voiceService } from './VoiceService';
 export { cameraService, MAX_VIDEO_PEERS } from './CameraService';
 export { screenShareService, MAX_SCREEN_PEERS } from './ScreenShareService';
+export { watchPartyService } from './WatchPartyService';
+export type { WatchPartyState, WatchPartyPeerInfo, WatchPartyRole } from './WatchPartyService';
 export { chatService } from './ChatService';
 export type { ChatMessage } from './ChatService';
 export { authService } from './AuthService';
