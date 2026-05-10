@@ -752,6 +752,209 @@ proposing, independently.
   file, they get an error and continue listening on voice. This is
   consistent with how every other watch party works.
 
+## 5.5. Feature roadmap (post-v2)
+
+After Mode C / forward shipped and basic sync (play, pause, seek,
+rate, mute) was stable, the obvious question is: what next? The
+table below catalogs candidate features, ordered roughly by
+expected value-to-effort ratio. Each feature is rated on:
+
+- **Value**: how often will users want this and how loudly. Five
+  stars = mass-appeal, one star = niche.
+- **Effort**: implementation complexity, including new APIs,
+  cross-browser testing, UX design.
+- **Risk**: chance of breaking existing flows, getting stuck on a
+  browser quirk, or hitting a privacy / abuse concern.
+
+Sort key: roughly value-minus-effort. Re-prioritize freely. Items
+already partly implemented are flagged as "v2.x".
+
+### Tier 1: clear wins, low risk
+
+#### F1. In-room reactions (emoji bursts overlaid on video)  -  **value 5, effort 2, risk 1**
+Click an emoji from a tray; it floats up the receivers' video
+overlay for ~2 s with the sender's friendly name. Wire format
+trivial (`wp-reaction { emoji, peerId, mediaTime }`). Replayed at
+the recorded mediaTime if a viewer scrubs back. Same primitive as
+Discord's "soundboard" reactions but visual-only. Inspired by
+Twitch chat overlays and the explosion of Plex's reaction bar.
+
+Twist: reactions decay only on the sender's display so the room
+isn't pelted with the host's own emoji clicks; the host *sees*
+them coming back from receivers. This makes it feel social rather
+than performative.
+
+#### F2. Side-panel chat tied to the watch party  -  **value 5, effort 1, risk 1**
+Sendie already has chat. Just pin a chat panel adjacent to the
+video for the duration of the watch party. Messages that arrive
+while paused get a small "(paused at 14:32)" timestamp suffix.
+Cheap; reuses the chat stack.
+
+#### F3. Document Picture-in-Picture detach  -  **value 4, effort 2, risk 2**
+The Document PiP API (Chrome 116+, Edge 116+) lets us pop the
+entire watch-party UI (video, controls, chat, reactions) into an
+always-on-top window. Available on Chrome and Edge, not Firefox
+or Safari. We render a "pop out" button visible only when
+`window.documentPictureInPicture` exists. Inside the PiP window,
+React continues to render the same component tree, so all sync
+state and events flow naturally.
+
+#### F4. Subtitle file forwarding  -  **value 4, effort 2, risk 1**
+Host drags a `.vtt` or `.srt` file onto the watch-party panel.
+We forward it via the same Mode C pipeline (`wp-file-start` with
+`mediaType: 'text/vtt'`). Receivers attach it as a `<track>`
+child of the video, defaulting to showing. Fixes the
+"the movie is dubbed but you want subtitles" problem at near-zero
+bandwidth cost. Also unlocks accessibility for deaf viewers
+without requiring the host to re-render the file.
+
+#### F5. Synced volume normalization (loudness target)  -  **value 3, effort 1, risk 1**
+Apply a Web Audio `DynamicsCompressorNode` + `GainNode` graph
+between the `<video>` audio and the speakers, parameterized to
+EBU R128 -23 LUFS or similar. Single checkbox in the panel.
+Solves the "this movie is way quieter than the next one" mismatch
+across files. Runs entirely on each peer's device, no protocol
+change.
+
+#### F6. Persistent playback-position resume  -  **value 4, effort 2, risk 1**
+On graceful leave, host writes `{ sessionId, mediaName, anchorTime }`
+to localStorage. Next time the same room starts a watch party with
+a same-named file, offer "Resume at 47:18?" Avoids the "where were
+we?" paralysis. Per-host because we don't have cross-device
+identity.
+
+### Tier 2: meaningful upgrades, moderate effort
+
+#### F7. Variant C2 progressive playback (MSE)  -  **value 5, effort 5, risk 4**
+Receivers start playback within seconds of the host clicking play
+instead of waiting for the full transfer. Implementation:
+`MediaSource` + `SourceBuffer.appendBuffer(chunk)` as bytes arrive.
+
+Hard parts:
+- File must be progressively decodable. mp4 with `moov` at the end
+  needs a "fast-start" rewrite on the host before sending. That's
+  a real C++ / WASM dependency (mp4box.js or similar).
+- Codec mime-type detection (`video/mp4; codecs="avc1.42E01E"`).
+  Need a probe pass on the host.
+- Fragmented mp4 / CMAF is the cleanest container; we may need to
+  on-the-fly transmux non-fragmented mp4. WebCodecs + custom
+  packetization is one path; the simpler path is to require
+  fragmented input and fall back to C1 for everything else.
+
+This is the single biggest perceived-quality jump available. Big
+project though.
+
+#### F8. Multi-host democratic mode  -  **value 3, effort 3, risk 3**
+"Anyone can pause." Already wire-stubbed (`wp-host-request`,
+`wp-host-grant`). Implement:
+- LWW-register on the timeline keyed by `(seq, peerId)`. Already
+  present.
+- UI for "I want to pause / seek" that sends a one-shot timeline
+  with `playing=false`. Receiving host's drift loop honors it.
+- Optional toggle for "host approval required" mode.
+
+Risk: race conditions on simultaneous pauses from two peers.
+Mitigated by the existing seq tiebreak.
+
+#### F9. Watch-party recording / clip export  -  **value 3, effort 3, risk 2**
+Selected viewers can mark a clip range (`[start, end]`) during
+playback. After the session, receivers can export the original
+file trimmed to the marked range plus a timeline of reactions and
+chat for that span. Privacy-respecting because it operates on
+file already on disk. Useful for "wait, that scene was great,
+let me grab it for the group chat."
+
+#### F10. Per-peer playhead dots on the seekbar  -  **value 3, effort 1, risk 1**
+Already partly built (`PeerStrip` shows percentages). Move the dots
+onto the host's seekbar so drift is visible at a glance.
+Re-uses the per-peer `mediaTime` already broadcast in
+`wp-peer-state`.
+
+#### F11. Late-joiner backfill: restart for everyone  -  **value 3, effort 1, risk 1**
+When a peer joins mid-playback, host sees a "Sarah just joined.
+Rewind to start? [Yes] [No, keep going]" toast. If yes, host
+seeks to 0 and resumes; the existing timeline propagation handles
+the rest. Netflix Party defaults this wrong (late joiners alone
+at 0); we default it right.
+
+#### F12. Background-tab keepalive  -  **value 3, effort 2, risk 2**
+When the host backgrounds the tab, browsers throttle timers and
+the heartbeat slows. Use the Wake Lock API (`navigator.wakeLock`)
+to keep the screen on during a watch party, and use a Web
+Worker for the heartbeat so it survives tab throttling. Solves
+the "I tabbed away to grab snacks and the room desynced" problem.
+
+### Tier 3: ambitious, novel
+
+#### F13. WebCodecs-based jitter-free playback  -  **value 4, effort 5, risk 5**
+Decode the file ourselves with `VideoDecoder`, schedule frames
+against the host's anchor explicitly, paint to a `<canvas>` with
+`requestAnimationFrame`-driven precise timing. Lets us guarantee
+sub-frame sync rather than the current ~50ms drift band.
+Massively more code than the current `<video>` approach. Realistic
+if we ever want broadcast-grade sync; overkill for casual viewing.
+
+#### F14. Audio-fingerprint cross-validation  -  **value 2, effort 3, risk 2**
+Each peer occasionally records a 1 s audio sample, computes a
+Chromaprint-like 32-bit hash, broadcasts it. If two peers' hashes
+match but their `mediaTime` differs by more than a fingerprint
+window, the sync is genuinely wrong (not just clock-skew noise).
+Triggers a hard re-sync. Pure self-validation. Novel for
+casual-viewing context. Published precedent: Shazam, MusicBrainz,
+the Twitch "AAA" project.
+
+#### F15. Voice-comment overlay  -  **value 2, effort 4, risk 3**
+Hold a hotkey to record a voice clip during playback. Clip is
+attached to the current `mediaTime`. Plays back automatically when
+anyone (including the recorder) reaches that timestamp later.
+Like a director's commentary track but generated live. Novel and
+high-delight; complex because it requires per-clip storage and
+playback scheduling.
+
+#### F16. Synced media-playback to non-Sendie devices (cast)  -  **value 4, effort 5, risk 4**
+Add Chromecast / AirPlay receiver targets so a viewer can fling
+the watch party to a TV. The TV becomes a "view-only" peer driven
+by the local Sendie tab. Possible via the
+Presentation API for Chromecast; AirPlay is iOS-only and harder.
+
+#### F17. Encrypted media support (DRM)  -  **value 1, effort 5, risk 5**
+Almost certainly out of scope and probably should stay there.
+Commercial streaming services use Widevine / FairPlay /
+PlayReady, which require an EME license server. Sendie is not
+that. Mentioning here to record the deliberate non-decision.
+
+### Tier 4: micro-polish
+
+These are tiny and worth doing whenever someone has 30 minutes:
+
+- **F18.** Host-side speed buttons (-5s, +5s, -10s, +10s) above
+  the seekbar. Native browser controls require menu navigation
+  for this; explicit buttons are faster.
+- **F19.** Frame-by-frame stepping with `,` and `.` keys when
+  paused. The standard video-editor convention.
+- **F20.** Picture-in-picture (legacy single-element PiP, distinct
+  from F3). One-line addition: `<video>` already supports
+  `pip-controls`.
+- **F21.** "Theater mode" UI toggle that hides everything except
+  the video and the current chat / reaction overlay.
+- **F22.** Configurable drift threshold (50 ms / 100 ms / 250 ms)
+  in a settings flyout for the audiophile-tier user.
+- **F23.** "Save the file when done" button on receivers,
+  promoting the in-memory Blob to a real download via
+  StreamSaver.
+- **F24.** Show a small bandwidth-used indicator while the host is
+  forwarding (Sendie already tracks this for file transfers).
+
+### What we are deliberately NOT building
+
+- **Server-side state.** No watch-party server, no rooms persisted
+  across sessions, no analytics. Everything is mesh.
+- **Streaming-service integration.** Netflix / YouTube / Disney+
+  proxying. Legal mine, the URL-based watch-party model fights
+  CDN buffering forever, and our value prop is files-on-disk.
+- **A "global discovery" of public watch parties.** Sendie is
+  invite-only by design; same posture here.
+
 ## 6. Implementation plan
 
 Three vertical slices, each independently shippable.
