@@ -257,11 +257,6 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   // active. Updated in sync with the video element by the
   // WatchPartyService for the host, by the drift loop for followers.
   const [playbackRate, setPlaybackRate] = useState(1);
-  // Stream-mode host diagnostic: number of MediaStreamTracks currently
-  // produced by captureStream(). 0 means we are not actually streaming
-  // anything (the source hasn't started playing); UI shows a big
-  // 'Click to start streaming' overlay in that case.
-  const [streamTracks, setStreamTracks] = useState(0);
   const [paused, setPaused] = useState(true);
   const [decodeError, setDecodeError] = useState<string | null>(null);
   // Mute state for the follower video. Default UNMUTED (user wants
@@ -273,8 +268,8 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
 
   // Convert the File to an object URL exactly once. Revoke on unmount
   // to free the kernel-side resources. If the service has set an
-  // explicit playbackUrl (e.g. a MediaSource URL for F-progressive),
-  // use that instead of creating one from the File. The service owns
+  // explicit playbackUrl (e.g. an MSE URL set by a future
+  // progressive-playback path), use that instead of creating one from the File. The service owns
   // that URL's lifecycle.
   useEffect(() => {
     if (state.playbackUrl) {
@@ -296,30 +291,18 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
 
   // Bind the video element to the watch-party service. Service sets up
   // the drift loop on followers and event forwarding on the host.
-  // In stream mode, also pipe the rendered output into the WebRTC fanout.
   useEffect(() => {
     if (!videoRef.current) return;
     const detach = watchPartyService.attachVideoElement(videoRef.current);
-    let detachStream: () => void = () => {};
-    if (state.role === 'host' && state.mode === 'stream') {
-      detachStream = watchPartyService.attachStreamSourceElement(videoRef.current);
-    }
-    return () => {
-      detach();
-      detachStream();
-    };
+    return detach;
   }, [objectUrl, state.role, state.mode]);
 
-  // Watch the host's stream-track count + decode errors. Drives the
-  // 'Click to start streaming' overlay and the codec error message.
+  // Watch decode errors and play/pause state.
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-    const updateTracks = () => {
-      setStreamTracks(watchPartyService.getStreamTrackCount());
-    };
-    const onPlay = () => { setPaused(false); updateTracks(); };
-    const onPause = () => { setPaused(true); updateTracks(); };
+    const onPlay = () => { setPaused(false); };
+    const onPause = () => { setPaused(true); };
     const onVolumeChange = () => { setFollowerMuted(el.muted); };
     const onError = () => {
       const err = el.error;
@@ -338,8 +321,6 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     el.addEventListener('volumechange', onVolumeChange);
     el.addEventListener('error', onError);
     el.addEventListener('loadeddata', onLoadedData);
-    const i = window.setInterval(updateTracks, 500);
-    updateTracks();
     onVolumeChange();
     return () => {
       el.removeEventListener('play', onPlay);
@@ -347,18 +328,8 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
       el.removeEventListener('volumechange', onVolumeChange);
       el.removeEventListener('error', onError);
       el.removeEventListener('loadeddata', onLoadedData);
-      clearInterval(i);
     };
   }, [objectUrl]);
-
-  const handleStartStream = () => {
-    const el = videoRef.current;
-    if (!el) return;
-    el.muted = true; // muted autoplay is universally allowed
-    el.play().catch((err) => {
-      console.error('[watch-party] manual play() failed:', err);
-    });
-  };
 
   // Track playbackRate changes from outside.
   useEffect(() => {
@@ -506,38 +477,13 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             // we autoplay now, the host watches alone for several
             // seconds while the bytes are still in flight.
             autoPlay={isHost && allPeersReceived}
-            muted={(isHost && state.mode === 'stream') || (!isHost && followerMuted)}
+            muted={!isHost && followerMuted}
             className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
           />
-          {/* Host transmux prep overlay (Mode C): the file is being
-              repackaged to fmp4 so receivers can do progressive
-              playback. Strictly precedes the 'sending to viewers'
-              overlay; we don't fan out until prep finishes. */}
-          {isHost && state.prepStatus && !decodeError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/85 text-white p-4">
-              <span className="text-2xl">⚙️</span>
-              <span className="text-sm font-medium">Preparing for streaming...</span>
-              <div className="w-full max-w-xs space-y-1">
-                <div className="h-1 rounded bg-slate-700 overflow-hidden">
-                  <div
-                    className="h-full bg-purple-400 transition-all"
-                    style={{ width: `${Math.round((state.prepStatus.progress) * 100)}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-slate-300 text-center tabular-nums">
-                  {Math.round(state.prepStatus.progress * 100)}%
-                </p>
-              </div>
-              <p className="text-[11px] text-slate-400 text-center">
-                Repackaging your file so viewers can start watching faster.
-                Skipped automatically for already-fragmented files.
-              </p>
-            </div>
-          )}
           {/* Forward-mode host gate: hold playback until all peers
               have received the file. Shows current per-peer progress.
               Disappears as soon as all peers hit 100%. */}
-          {isHost && state.mode === 'forward' && !state.prepStatus && !allPeersReceived && !decodeError && (
+          {isHost && state.mode === 'forward' && !allPeersReceived && !decodeError && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 text-white p-4">
               <span className="text-2xl">📡</span>
               <span className="text-sm font-medium">Sending to viewers...</span>
@@ -568,21 +514,6 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
                 Playback will start automatically when everyone is ready.
               </p>
             </div>
-          )}
-          {/* Stream-mode host overlay: shows whenever we don't yet have
-              live tracks flowing. The big button forces a play() on a
-              fresh user-gesture click, which always succeeds. */}
-          {isHost && state.mode === 'stream' && (paused || streamTracks === 0) && !decodeError && (
-            <button
-              onClick={handleStartStream}
-              className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white"
-            >
-              <span className="text-2xl">▶</span>
-              <span className="text-sm font-medium">Click to start streaming</span>
-              <span className="text-[11px] text-slate-300">
-                Tracks live: {streamTracks} (need at least 1)
-              </span>
-            </button>
           )}
           {/* Follower autoplay-fallback overlay. Two flavors:
               - If still paused (rare; muted autoplay should succeed),
@@ -624,21 +555,6 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             </button>
           )}
         </div>
-      )}
-      {isHost && state.mode === 'stream' && !decodeError && (
-        <p className="text-[11px] text-slate-500">
-          Your video plays muted locally so it could start automatically; viewers still
-          hear audio. Click the speaker icon in the player to unmute for yourself.
-          {streamTracks > 0 && ` Streaming ${streamTracks} track${streamTracks === 1 ? '' : 's'} to viewers.`}
-        </p>
-      )}
-
-      {/* Receiver progressive-playback status. When MSE is active and
-          the transfer is still in flight, the player has already
-          started but the user might wonder whether they're missing
-          bytes. Show the receive percentage so the answer is visible. */}
-      {!isHost && state.playbackUrl && state.mode === 'forward' && (
-        <ProgressiveStatus state={state} />
       )}
 
       {/* Custom seekbar / rate picker for the host, since the service
@@ -842,16 +758,6 @@ function PeerStrip({ peers, duration }: PeerStripProps) {
   );
 }
 
-interface StreamFollowerProps {
-  state: WatchPartyState;
-  peers: ReadonlyMap<string, WatchPartyPeerInfo>;
-  onLeave: () => void;
-}
-
-// Suppress unused warnings; props kept exported for ABI stability while
-// we migrate other code that imports them.
-export type { StreamFollowerProps as _StreamFollowerProps };
-
 function LateJoinerToast({ peerId, onDismiss }: { peerId: string; onDismiss: () => void }) {
   const peerStore = useAppStore((s) => s.peers);
   const name = peerStore.get(peerId)?.friendlyName ?? peerId.slice(0, 8);
@@ -879,17 +785,6 @@ function LateJoinerToast({ peerId, onDismiss }: { peerId: string; onDismiss: () 
         </button>
       </span>
     </div>
-  );
-}
-
-function ProgressiveStatus({ state }: { state: WatchPartyState }) {
-  const hostId = state.hostPeerId ?? '';
-  const pct = Math.round(((state.forwardProgress.get(hostId) ?? 0) * 100));
-  if (pct >= 100) return null;
-  return (
-    <p className="text-[11px] text-slate-500">
-      Streaming progressively while we receive — {pct}% of the file delivered.
-    </p>
   );
 }
 

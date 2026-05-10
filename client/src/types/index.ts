@@ -168,21 +168,7 @@ export type DataChannelMessage =
   // would auto-grant.
   | { type: 'wp-host-request'; sessionId: string }
   | { type: 'wp-host-grant'; sessionId: string; newHostPeerId: string }
-  // Live-stream mode (DEPRECATED in v2): host announces it is sharing
-  // the rendered output of a media element via WebRTC tracks
-  // (captureStream). Removed because Firefox-on-Linux can't decode
-  // H.264, captureStream is uneven across browsers, and Mode C
-  // (forward-then-play) is strictly better. Kept here so old
-  // serialized messages don't crash the parser.
-  | {
-      type: 'wp-stream-start';
-      sessionId: string;
-      hostPeerId: string;
-      streamId: string;
-      mediaName: string;
-      mediaDuration: number;
-    }
-  // Mode C (forward-then-play): host sends the file bytes to every
+  // Forward mode: host sends the file bytes to every
   // peer over the data channel, peers buffer in memory, then the room
   // enters synced-state playback (Mode A timeline algorithm) using
   // the resulting Blob URLs. Decoupled from MultiPeerFileTransferService

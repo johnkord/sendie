@@ -84,22 +84,19 @@ const OFFSET_WINDOW = 9;
 // fudge factor for jittery links.
 const STALE_TIMELINE_MS = TIMELINE_HEARTBEAT_MS * 3 + 1000;
 
-// Encoder-fanout cap for stream mode. The host runs one WebRTC encoder
-// per peer; matches the screen-share cap so the same hardware ceiling
-// applies. Above this we refuse to start in stream mode and suggest
-// local-file mode instead.
-const MAX_STREAM_PEERS = 4;
-
 export type WatchPartyRole = 'host' | 'follower' | 'idle';
-// 'local' = each peer plays their own local copy. 'forward' = host sends
-// the file bytes to peers via the data channel; peers play from the
-// resulting in-memory Blob URL with the timeline algorithm. 'stream'
-// (legacy, kept for type-compat) = captureStream-based live re-encode;
-// removed from the UI in v2 because it's brittle on Firefox / Safari
-// (see docs section 2.6).
-export type WatchPartyMode = 'local' | 'forward' | 'stream';
+// 'local' = each peer plays their own local copy.
+// 'forward' = host sends the file bytes to peers via the data channel;
+// peers play from the resulting in-memory Blob URL with the timeline
+// algorithm.
+//
+// A third mode ('stream', captureStream-based live re-encode) was
+// shipped briefly in v2 and removed. A progressive 'forward'
+// variant (transmux + MSE, and Service Worker byte-range proxy)
+// was attempted twice and reverted; see docs/transmuxing-research.md.
+export type WatchPartyMode = 'local' | 'forward';
 
-// --- Mode C (forward) tuning ---
+// --- Forward-mode tuning ---
 
 // Chunk size for the in-watch-party file forward. 16 KB is well below
 // the SCTP message ceiling on every browser (Firefox tops out around
@@ -120,35 +117,25 @@ export interface WatchPartyState {
   sessionId: string | null;
   role: WatchPartyRole;
   // Transport mode. 'local' = each peer plays from a local file and
-  // we sync timestamps. 'stream' = host streams rendered A/V to
-  // followers via WebRTC tracks (no clock sync needed).
+  // we sync timestamps.
   mode: WatchPartyMode;
   hostPeerId: string | null;
   // Display-only metadata advertised by the host.
   mediaName: string | null;
   mediaDuration: number;
-  // The user's locally-loaded file (host or follower in local mode).
-  // null in stream mode for followers.
+  // The user's locally-loaded file. In 'forward' mode receivers
+  // synthesize this from received chunks once the file finishes
+  // arriving.
   localFile: File | null;
-  // Stream id the host advertised in stream mode. Followers use this
-  // to match incoming WebRTC tracks to this watch-party.
-  // Repurposed in Mode C: kept null. (Field retained to keep the
-  // serialized state shape stable while the UI migrates.)
-  streamId: string | null;
-  // Mode C: per-peer file-forward progress (0..1). Host: progress to
-  // each follower. Follower: their own receive progress (single value
-  // keyed by hostPeerId in the same map). null = not transferring.
+  // Per-peer file-forward progress (0..1). Host: progress to each
+  // follower. Follower: their own receive progress (single value
+  // keyed by hostPeerId in the same map).
   forwardProgress: Map<string, number>;
-  // Host-side preparation (transmux) status. null = not preparing.
-  // When set, the host UI shows a progress bar and gates the actual
-  // file fan-out. Receivers see no announcement until prep is done.
-  prepStatus: { phase: 'transmux'; progress: number } | null;
-  // Mode C, F-progressive: an explicit URL the UI should bind to the
-  // <video> element. Set on the receiver to a MediaSource object URL
-  // when progressive playback is active; null otherwise (in which
-  // case the UI falls back to URL.createObjectURL(localFile)).
-  // We thread this through state rather than File so the UI doesn't
-  // need to know about MediaSource at all.
+  // Optional explicit URL the UI should bind to the <video> element.
+  // Set by progressive-playback paths; null in normal forward mode
+  // (UI falls back to URL.createObjectURL(localFile)). Currently
+  // always null; reserved for a future re-attempt at progressive
+  // playback (see docs/transmuxing-research.md).
   playbackUrl: string | null;
   // Last-seen heartbeat info (followers only).
   lastTimelineAt: number;
@@ -188,10 +175,8 @@ class WatchPartyService {
     mediaName: null,
     mediaDuration: 0,
     localFile: null,
-    streamId: null,
     forwardProgress: new Map(),
     playbackUrl: null,
-    prepStatus: null,
     lastTimelineAt: 0,
     error: null,
   };
@@ -240,29 +225,11 @@ class WatchPartyService {
   // so explicit user actions are never swallowed by the cooldown.
   private driftSeekCooldownClearedAt = 0;
   // Queued seek to apply once the host's <video> has loaded
-  // metadata. Used for the F-resume flow where the UI knows the
+  // metadata. Used for the resume-position flow where the UI knows the
   // resume point before the element exists. Cleared on apply.
   private pendingHostSeek: number | null = null;
 
-  // -------- Stream mode (Mode B) state --------
-
-  // Host: captureStream() output, retained so we can stop tracks on
-  // leave. The source <video> itself is owned by the UI (we don't
-  // need to remember it after wiring the stream).
-  private streamCapture: MediaStream | null = null;
-  // Host: object URL for the file. We own its lifecycle.
-  private streamSourceObjectUrl: string | null = null;
-
-  // Follower: incoming MediaStream from the host's RTC tracks. The UI
-  // subscribes to changes and binds it to <video srcObject>.
-  private remoteStream: MediaStream | null = null;
-  private remoteStreamSubscribers: Set<() => void> = new Set();
-  // Follower: pending tracks received before the wp-stream-start
-  // announcement landed (similar to ScreenShareService's pending
-  // buffer). Keyed by streamId. Swept on TTL or claim.
-  private pendingRemoteStreams: Map<string, MediaStream> = new Map();
-
-  // -------- Mode C (forward) state --------
+  // -------- Forward-mode state --------
 
   // Host: the file we are forwarding, kept until the session ends so
   // late joiners can request a re-send.
@@ -282,29 +249,6 @@ class WatchPartyService {
   private receivedBlobUrl: string | null = null;
   // Follower: progress reported back to host every PROGRESS_ACK_EVERY chunks.
   private static readonly PROGRESS_ACK_EVERY = 32;
-
-  // -------- F-progressive (MSE) state --------
-
-  // MediaSource for progressive playback. null if MSE was not attempted
-  // or fell back to Blob assembly.
-  private mse: MediaSource | null = null;
-  private mseUrl: string | null = null;
-  private mseSourceBuffer: SourceBuffer | null = null;
-  // FIFO of chunks waiting to be appendBuffer-ed. SourceBuffer can only
-  // accept one append at a time (rejects while updating); we drain the
-  // queue from the 'updateend' event.
-  private mseQueue: Uint8Array[] = [];
-  // Set true once we've decided MSE won't work for this file (e.g.
-  // appendBuffer threw, or container is unstreamable). Receiver then
-  // falls back to the Blob-assembly path on file-end.
-  private mseFailed = false;
-  // Set true once we've signaled endOfStream so we don't double-call.
-  private mseEnded = false;
-  // Once we have enough leading bytes to decide whether the container
-  // is streamable, this is set to a verdict. Streamable = MSE; else
-  // tear down MSE and use Blob assembly.
-  // 'pending' until we've sniffed the first ~64 KB.
-  private mseStreamableVerdict: 'pending' | 'yes' | 'no' = 'pending';
 
   constructor() {
     multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
@@ -334,66 +278,15 @@ class WatchPartyService {
     // next heartbeat.
     multiPeerWebRTCService.on('onDataChannelOpen', (peerId) => {
       if (this.state.role === 'host' && this.state.sessionId) {
-        if (this.state.mode === 'stream') {
-          this.sendStreamStart(peerId);
-        } else {
-          this.sendTimeline(peerId);
-        }
-        // Mode C late-joiner: start a fresh forward to this peer,
-        // but only if host prep is finished. If prep is still in
-        // flight, runHostPrep's callback will pick up this peer
-        // along with the rest of the room.
-        if (this.state.mode === 'forward'
-            && this.forwardSourceFile
-            && this.state.prepStatus === null) {
+        this.sendTimeline(peerId);
+        // Forward-mode late-joiner: start a fresh forward to this peer.
+        if (this.state.mode === 'forward' && this.forwardSourceFile) {
           void this.startForwardTo(peerId);
         }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
         this.broadcastPeerState();
       }
     });
-
-    // Stream-mode: receive WebRTC media tracks from the host.
-    // Pattern mirrors ScreenShareService: incoming track may arrive
-    // before or after the wp-stream-start announcement.
-    multiPeerWebRTCService.on('onTrack', (peerId, stream, _kind) => {
-      if (this.state.role === 'follower' && this.state.mode === 'stream'
-          && this.state.hostPeerId === peerId) {
-        // We are expecting this. Claim if it matches the announced
-        // streamId, or buffer briefly.
-        if (this.state.streamId && stream.id === this.state.streamId) {
-          this.remoteStream = stream;
-          this.notifyRemoteStream();
-          return;
-        }
-      }
-      // Buffer for a few seconds in case the announcement is in
-      // flight. Sweep TTL so non-watch-party tracks (camera, screen)
-      // don't pile up here.
-      this.pendingRemoteStreams.set(stream.id, stream);
-      setTimeout(() => this.pendingRemoteStreams.delete(stream.id), 5000);
-    });
-  }
-
-  /**
-   * Subscribe to remote-stream changes (stream-mode followers). The UI
-   * calls this and binds the stream to a <video srcObject> when the
-   * callback fires.
-   */
-  onRemoteStreamChanged(cb: () => void): () => void {
-    this.remoteStreamSubscribers.add(cb);
-    return () => { this.remoteStreamSubscribers.delete(cb); };
-  }
-
-  getRemoteStream(): MediaStream | null { return this.remoteStream; }
-
-  /** Number of MediaStreamTracks currently produced by captureStream() on the host. 0 = not streaming. */
-  getStreamTrackCount(): number {
-    return this.streamCapture?.getTracks().filter((t) => t.readyState === 'live').length ?? 0;
-  }
-
-  private notifyRemoteStream(): void {
-    for (const cb of this.remoteStreamSubscribers) cb();
   }
 
   on<K extends keyof WatchPartyEvents>(event: K, handler: WatchPartyEvents[K]): void {
@@ -447,15 +340,6 @@ class WatchPartyService {
     if (this.state.role !== 'idle') {
       throw new Error('Already in a watch party. Leave first.');
     }
-    if (mode === 'stream') {
-      const peerCount = this.connectedPeerCount();
-      if (peerCount > MAX_STREAM_PEERS) {
-        throw new Error(
-          `Stream mode supports up to ${MAX_STREAM_PEERS} peers (you have ${peerCount}). ` +
-          `Use local-file mode for larger rooms.`,
-        );
-      }
-    }
     const sessionId = cryptoService.generateFileId();
     const myPeerId = this.getMyPeerId();
     this.state = {
@@ -466,10 +350,8 @@ class WatchPartyService {
       mediaName: file.name,
       mediaDuration: 0, // populated when the video metadata loads
       localFile: file,
-      streamId: null,
       forwardProgress: new Map(),
       playbackUrl: null,
-      prepStatus: null,
       lastTimelineAt: this.localMono(),
       error: null,
     };
@@ -485,148 +367,17 @@ class WatchPartyService {
       this.broadcastTimeline();
       this.startHeartbeat();
     } else if (mode === 'forward') {
-      // Mode C: kick off a file forward to every currently-connected
-      // peer. The timeline heartbeat ALSO starts so followers can
-      // sync once they have the file. Late joiners will be picked up
-      // in onDataChannelOpen.
+      // Kick off a file forward to every currently-connected peer.
+      // The timeline heartbeat ALSO starts so followers can sync once
+      // they have the file. Late joiners are picked up in
+      // onDataChannelOpen.
       this.forwardSourceFile = file;
       this.startHeartbeat();
-      // Best-effort transmux pass: if the file is plain mp4 (not
-      // already fmp4 / webm), repackage to fmp4 so receivers can use
-      // the F-progressive MSE path. Failure is non-fatal; we fall
-      // through to forwarding the original bytes which still plays
-      // (just without progressive playback). See
-      // docs/transmuxing-research.md for the design.
-      void this.runHostPrep(file).then(() => {
-        for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
-          if (peerId === myPeerId) continue;
-          void this.startForwardTo(peerId);
-        }
-      });
+      for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
+        if (peerId === myPeerId) continue;
+        void this.startForwardTo(peerId);
+      }
     }
-    // For stream mode: the UI must call attachStreamSourceElement() with
-    // the host's <video>. captureStream and the wp-stream-start
-    // announcement happen there, once we have an element to capture
-    // from.
-  }
-
-  /**
-   * Stream-mode: bind the host's <video> element. We call captureStream()
-   * on it and pipe every track into the existing WebRTC fanout, then
-   * announce wp-stream-start so followers can match the incoming tracks.
-   * Returns an unbind function the UI MUST call on unmount.
-   */
-  attachStreamSourceElement(el: HTMLVideoElement): () => void {
-    if (this.state.role !== 'host' || this.state.mode !== 'stream') {
-      return () => {};
-    }
-    type CaptureEl = HTMLVideoElement & {
-      captureStream?: () => MediaStream;
-      mozCaptureStream?: () => MediaStream;
-    };
-    const cEl = el as CaptureEl;
-    const capture = cEl.captureStream?.bind(cEl) ?? cEl.mozCaptureStream?.bind(cEl);
-    if (!capture) {
-      this.surfaceError('Streaming not supported in this browser; switch to local-file mode.');
-      return () => {};
-    }
-    // Mute the local element BEFORE capturing so we hit the
-    // muted-autoplay path unconditionally. Per spec captureStream()
-    // taps audio upstream of the mute stage, so peers still hear it.
-    el.muted = true;
-    // captureStream returns a live stream that gets tracks added as the
-    // element starts playing. We add them to the mesh as they appear.
-    // Critically: on Chromium captureStream returns an empty MediaStream
-    // until the element actually starts playing, so we MUST kick off
-    // playback or followers will see 'connecting...' forever.
-    const stream = capture();
-    this.streamCapture = stream;
-    this.state = { ...this.state, streamId: stream.id };
-    const wired = new Set<string>();
-    const wireTrack = (track: MediaStreamTrack) => {
-      if (wired.has(track.id)) return;
-      wired.add(track.id);
-      multiPeerWebRTCService.addLocalTrack(track, stream);
-      // Re-announce so followers who joined before tracks materialized
-      // can claim the now-flowing tracks; the streamId hasn't changed
-      // but a fresh announcement helps the pending-buffer flow.
-      this.broadcastStreamStart();
-    };
-    for (const t of stream.getTracks()) wireTrack(t);
-    stream.addEventListener('addtrack', (ev) => wireTrack(ev.track));
-    // Set duration when the element knows it, and start playback. The
-    // file-pick click counts as a user gesture so autoplay-with-sound
-    // is granted; if it isn't (e.g. iOS Safari quirks) we surface a
-    // 'click to start' error and the user can hit the native play
-    // button.
-    const onLoadedMeta = () => {
-      this.state = { ...this.state, mediaDuration: el.duration || 0 };
-      this.emitState();
-      this.broadcastStreamStart();
-      // Force-mute before play(): unmuted autoplay is blocked on sites
-      // without Media Engagement, which we cannot assume. Muted
-      // autoplay always works. Per spec, captureStream() taps audio
-      // upstream of the element's mute stage so peers still hear it.
-      // The UI surfaces this and lets the host unmute for themselves.
-      el.muted = true;
-      el.play().then(() => {
-        console.log('[watch-party] host play() ok; tracks=', this.streamCapture?.getTracks().length);
-      }).catch((err) => {
-        console.warn('[watch-party] host play() rejected even when muted:', err);
-        this.surfaceError('Click the play button on your video to start streaming.');
-      });
-    };
-    el.addEventListener('loadedmetadata', onLoadedMeta);
-    // The video may already have loaded metadata by the time we attach
-    // (loadedmetadata is one-shot and fires before this listener). Kick
-    // playback in that case too.
-    if (el.readyState >= 1 /* HAVE_METADATA */) {
-      onLoadedMeta();
-    }
-    this.emitState();
-    // Announce now so followers who already have a data channel can
-    // match incoming tracks immediately. We may re-announce once
-    // duration is known and once tracks land.
-    this.broadcastStreamStart();
-    return () => {
-      el.removeEventListener('loadedmetadata', onLoadedMeta);
-      // We do NOT stop the tracks here; leave() handles teardown so
-      // the host can unmount/remount the element (e.g. fullscreen
-      // toggle) without breaking the stream. If the user really wants
-      // to end, they call leave().
-    };
-  }
-
-  private broadcastStreamStart(): void {
-    if (this.state.role !== 'host' || this.state.mode !== 'stream') return;
-    if (!this.state.sessionId || !this.state.streamId) return;
-    const msg: DataChannelMessage = {
-      type: 'wp-stream-start',
-      sessionId: this.state.sessionId,
-      hostPeerId: this.state.hostPeerId ?? this.getMyPeerId(),
-      streamId: this.state.streamId,
-      mediaName: this.state.mediaName ?? '',
-      mediaDuration: this.state.mediaDuration,
-    };
-    multiPeerWebRTCService.broadcast(JSON.stringify(msg));
-  }
-
-  private sendStreamStart(peerId: string): void {
-    if (this.state.role !== 'host' || this.state.mode !== 'stream') return;
-    if (!this.state.sessionId || !this.state.streamId) return;
-    const msg: DataChannelMessage = {
-      type: 'wp-stream-start',
-      sessionId: this.state.sessionId,
-      hostPeerId: this.state.hostPeerId ?? this.getMyPeerId(),
-      streamId: this.state.streamId,
-      mediaName: this.state.mediaName ?? '',
-      mediaDuration: this.state.mediaDuration,
-    };
-    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
-  }
-
-  private connectedPeerCount(): number {
-    return multiPeerWebRTCService.getConnectedPeers().length;
   }
 
   /**
@@ -744,19 +495,7 @@ class WatchPartyService {
         sessionId: this.state.sessionId,
       } satisfies DataChannelMessage));
     }
-    // Tear down stream-mode tracks if any.
-    if (this.streamCapture) {
-      for (const track of this.streamCapture.getTracks()) {
-        try { multiPeerWebRTCService.removeLocalTrack(track); } catch { /* ignore */ }
-        try { track.stop(); } catch { /* ignore */ }
-      }
-      this.streamCapture = null;
-    }
-    if (this.streamSourceObjectUrl) {
-      URL.revokeObjectURL(this.streamSourceObjectUrl);
-      this.streamSourceObjectUrl = null;
-    }
-    // Mode C teardown.
+    // Forward-mode teardown.
     for (const cancel of this.forwardCancelByPeer.values()) cancel();
     this.forwardCancelByPeer.clear();
     this.forwardAckedByPeer.clear();
@@ -767,10 +506,6 @@ class WatchPartyService {
       URL.revokeObjectURL(this.receivedBlobUrl);
       this.receivedBlobUrl = null;
     }
-    this.tearDownMse();
-    this.mseFailed = false;
-    this.mseEnded = false;
-    this.mseStreamableVerdict = 'pending';
     this.stopHeartbeat();
     this.stopStaleWatchdog();
     if (this.driftLoopCancel) { this.driftLoopCancel(); this.driftLoopCancel = null; }
@@ -782,10 +517,8 @@ class WatchPartyService {
       mediaName: null,
       mediaDuration: 0,
       localFile: null,
-      streamId: null,
       forwardProgress: new Map(),
       playbackUrl: null,
-      prepStatus: null,
       lastTimelineAt: 0,
       error: null,
     };
@@ -795,8 +528,6 @@ class WatchPartyService {
     this.pendingHostSeek = null;
     this.hostClockOffset = 0;
     this.videoEl = null;
-    this.remoteStream = null;
-    this.notifyRemoteStream();
     this.emitState();
     this.emitPeers();
   }
@@ -956,7 +687,6 @@ class WatchPartyService {
     playbackRate?: number;
   }): void {
     if (this.state.role !== 'host' || !this.state.sessionId) return;
-    if (this.state.mode === 'stream') return; // stream mode has no timeline
     const lookahead = opts?.lookahead ?? 0;
     const playing = opts?.playing ?? (this.videoEl ? !this.videoEl.paused : false);
     const anchorTime = opts?.anchorTimeOverride ?? this.videoEl?.currentTime ?? 0;
@@ -1074,7 +804,6 @@ class WatchPartyService {
     switch (msg.type) {
       case 'wp-timeline': return this.handleTimeline(peerId, msg);
       case 'wp-peer-state': return this.handlePeerState(peerId, msg);
-      case 'wp-stream-start': return this.handleStreamStart(peerId, msg);
       case 'wp-file-start': return this.handleFileStart(peerId, msg);
       case 'wp-file-chunk-meta': return this.handleFileChunkMeta(peerId, msg);
       case 'wp-file-end': return this.handleFileEnd(peerId, msg);
@@ -1084,40 +813,6 @@ class WatchPartyService {
       case 'wp-host-grant': return this.handleHostGrant(peerId, msg);
       default: return;
     }
-  }
-
-  private handleStreamStart(
-    peerId: string,
-    msg: Extract<DataChannelMessage, { type: 'wp-stream-start' }>,
-  ): void {
-    // Hosts receiving their own message via echo (shouldn't happen but
-    // defensive): ignore.
-    if (this.state.role === 'host') return;
-    // Wrong session (stragglers from before).
-    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
-    // Discovery / refresh.
-    this.state = {
-      ...this.state,
-      sessionId: msg.sessionId,
-      role: 'follower',
-      mode: 'stream',
-      hostPeerId: msg.hostPeerId,
-      mediaName: msg.mediaName,
-      mediaDuration: msg.mediaDuration,
-      streamId: msg.streamId,
-      lastTimelineAt: this.localMono(),
-      error: null,
-    };
-    // If we already received the matching track in the pending buffer,
-    // promote it.
-    const pending = this.pendingRemoteStreams.get(msg.streamId);
-    if (pending) {
-      this.remoteStream = pending;
-      this.pendingRemoteStreams.delete(msg.streamId);
-      this.notifyRemoteStream();
-    }
-    this.emitState();
-    void peerId;
   }
 
   private handleTimeline(
@@ -1449,70 +1144,7 @@ class WatchPartyService {
     this.leave();
   }
 
-  // -------- Mode C: file-forward host side --------
-
-  /**
-   * Optional preflight pass on the host: if the file is plain mp4
-   * (not already fmp4 / webm), repackage it to fmp4 in memory using
-   * mp4box.js so receivers can do progressive playback via MSE. See
-   * docs/transmuxing-research.md.
-   *
-  /**
-   * Optional preflight pass on the host: if the file is plain mp4
-   * (not already fmp4 / webm), repackage it to fmp4 in memory using
-   * mp4box.js so receivers can do progressive playback via MSE. See
-   * docs/transmuxing-research.md.
-   *
-   * Failures are non-fatal: any error logs and falls through to
-   * forwarding the original bytes (still plays, just without
-   * progressive playback).
-   *
-   * DISABLED BY DEFAULT (Sept 2026). We discovered via dogfooding
-   * that the transmuxed fmp4 Blob is NOT playable via direct <video>
-   * src= (the browser correctly rejects fmp4 as 'no supported
-   * source' since fmp4 needs MSE). Combined with intermittent
-   * SourceBuffer 'error' events on the MSE path that we haven't
-   * root-caused, the net effect is that transmux makes the receiver
-   * WORSE: original bytes would have played fine via the Blob
-   * fallback, but transmuxed bytes can't fall back at all. Until we
-   * either (a) pin the SourceBuffer error and prove MSE always
-   * works, or (b) keep both originals and fmp4 simultaneously, we
-   * keep transmux off so the simple Blob path stays reliable.
-   *
-   * Enable per-host by setting localStorage.sendie_wp_transmux=1.
-   */
-  private async runHostPrep(file: File): Promise<void> {
-    const enabled = (() => {
-      try { return localStorage.getItem('sendie_wp_transmux') === '1'; }
-      catch { return false; }
-    })();
-    if (!enabled) {
-      console.log('[watch-party] transmux disabled (set localStorage.sendie_wp_transmux=1 to re-enable for testing)');
-      return;
-    }
-    try {
-      const { classifyForTransmux, transmuxToFmp4 } = await import('./watchPartyTransmux');
-      const decision = await classifyForTransmux(file);
-      console.log('[watch-party] host transmux decision:', decision, 'size=', file.size, 'type=', file.type);
-      if (decision !== 'transmux') return;
-      this.state = { ...this.state, prepStatus: { phase: 'transmux', progress: 0 } };
-      this.emitState();
-      const { blob, mediaType } = await transmuxToFmp4(file, (p) => {
-        this.state = {
-          ...this.state,
-          prepStatus: { phase: 'transmux', progress: p.progress },
-        };
-        this.emitState();
-      });
-      console.log('[watch-party] host transmux done; bytes=', blob.size, 'mime=', mediaType);
-      this.forwardSourceFile = new File([blob], file.name, { type: mediaType });
-    } catch (err) {
-      console.warn('[watch-party] host transmux failed; forwarding original bytes:', err);
-    } finally {
-      this.state = { ...this.state, prepStatus: null };
-      this.emitState();
-    }
-  }
+  // -------- Forward mode: host-side file fan-out --------
 
   private async startForwardTo(peerId: string): Promise<void> {
     const file = this.forwardSourceFile;
@@ -1589,7 +1221,7 @@ class WatchPartyService {
     }
   }
 
-  // -------- Mode C: file-forward receiver side --------
+  // -------- Forward mode: file-forward receiver side --------
 
   private handleFileStart(
     peerId: string,
@@ -1619,13 +1251,6 @@ class WatchPartyService {
     this.receiveMimeType = msg.mediaType || 'video/mp4';
     this.receiveFileName = msg.mediaName;
     this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, 0);
-    // Reset any prior MSE state. We'll attempt setup once we've sniffed
-    // the first ~64 KB of bytes (in handleFileChunkMeta).
-    this.tearDownMse();
-    this.mseFailed = false;
-    this.mseEnded = false;
-    this.mseStreamableVerdict = 'pending';
-    this.mseQueue = [];
     this.emitState();
     this.startStaleWatchdog();
   }
@@ -1647,31 +1272,6 @@ class WatchPartyService {
     const total = this.receiveTotalChunks || 1;
     this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, received / total);
 
-    // F-progressive: feed MSE as bytes arrive. We only feed in
-    // chunk-index order (any out-of-order arrivals get queued; we
-    // drain the queue when the SourceBuffer is no longer 'updating').
-    // Decide on streamability the first time we have enough leading
-    // bytes (~64 KB) to inspect the container header.
-    if (this.mseStreamableVerdict === 'pending' && this.haveLeadingBytes(64 * 1024)) {
-      const head = this.assembleLeadingBytes(64 * 1024);
-      const streamable = isStreamableContainer(this.receiveMimeType, head);
-      const codec = streamable ? pickMseCodec(this.receiveMimeType) : null;
-      console.log(
-        '[watch-party] receiver MSE check: mediaType=', this.receiveMimeType,
-        'streamable=', streamable, 'codec=', codec,
-        'MSE supported=', typeof MediaSource !== 'undefined',
-      );
-      if (streamable && codec && typeof MediaSource !== 'undefined') {
-        this.mseStreamableVerdict = 'yes';
-        this.setupMse(codec);
-      } else {
-        this.mseStreamableVerdict = 'no';
-      }
-    }
-    if (this.mseStreamableVerdict === 'yes' && !this.mseFailed) {
-      this.queueChunksForMse();
-    }
-
     if (received % WatchPartyService.PROGRESS_ACK_EVERY === 0 || received === total) {
       this.emitState();
       const ack: DataChannelMessage = {
@@ -1681,157 +1281,6 @@ class WatchPartyService {
       };
       multiPeerWebRTCService.sendTo(peerId, JSON.stringify(ack));
     }
-  }
-
-  /** True if we have a contiguous run from chunk 0 covering at least n bytes. */
-  private haveLeadingBytes(n: number): boolean {
-    let total = 0;
-    for (let i = 0; ; i++) {
-      const c = this.receiveBuffers.get(i);
-      if (!c) return false;
-      total += c.length;
-      if (total >= n) return true;
-    }
-  }
-
-  /** Concatenate the first chunks until we have >= n bytes (or run out). */
-  private assembleLeadingBytes(n: number): Uint8Array {
-    const parts: Uint8Array[] = [];
-    let total = 0;
-    for (let i = 0; total < n; i++) {
-      const c = this.receiveBuffers.get(i);
-      if (!c) break;
-      parts.push(c);
-      total += c.length;
-    }
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const p of parts) {
-      out.set(p, offset);
-      offset += p.length;
-    }
-    return out;
-  }
-
-  // Index up to which we've already passed chunks to MSE (exclusive).
-  // chunks[0..mseAppendedThrough) have been queued or appended.
-  private mseAppendedThrough = 0;
-
-  /**
-   * Find any newly-contiguous chunks past mseAppendedThrough and queue
-   * them for SourceBuffer.appendBuffer. Drain the queue as the
-   * SourceBuffer becomes idle.
-   */
-  private queueChunksForMse(): void {
-    while (true) {
-      const next = this.receiveBuffers.get(this.mseAppendedThrough);
-      if (!next) break;
-      this.mseQueue.push(next);
-      this.mseAppendedThrough++;
-    }
-    this.flushMseQueue();
-  }
-
-  private setupMse(codec: string): void {
-    try {
-      this.mse = new MediaSource();
-      this.mseUrl = URL.createObjectURL(this.mse);
-      this.mseAppendedThrough = 0;
-      // Failsafe: if 'sourceopen' never fires (some browsers race when
-      // the URL is bound before the element is in the DOM), give up
-      // and fall back to Blob assembly. 5 s is generous; on a healthy
-      // path it fires within ~10 ms of the <video src=> assignment.
-      const failsafe = window.setTimeout(() => {
-        if (!this.mseSourceBuffer && !this.mseFailed) {
-          console.warn('[watch-party] MSE sourceopen never fired; falling back to Blob');
-          this.markMseFailed();
-        }
-      }, 5000);
-      this.mse.addEventListener('sourceopen', () => {
-        clearTimeout(failsafe);
-        if (!this.mse) return;
-        try {
-          const sb = this.mse.addSourceBuffer(codec);
-          // Default 'segments' mode honors DTS/PTS in the fmp4 tfdt
-          // boxes. We previously set 'sequence' (which tells the
-          // browser to ignore segment timestamps and concatenate)
-          // and that conflicted with fragmented mp4 from mp4box.js.
-          // Leave at default.
-          sb.addEventListener('updateend', () => this.flushMseQueue());
-          sb.addEventListener('error', (ev) => {
-            // SourceBuffer 'error' has no detail; correlate with the
-            // video element's MediaError to give the user a clue.
-            const ve = this.videoEl?.error;
-            console.warn(
-              '[watch-party] SourceBuffer error; falling back to Blob.',
-              'video.error:', ve ? `code=${ve.code} msg=${ve.message}` : 'none',
-              'event:', ev,
-            );
-            this.markMseFailed();
-          });
-          this.mseSourceBuffer = sb;
-          this.flushMseQueue();
-        } catch (err) {
-          console.warn('[watch-party] addSourceBuffer threw; falling back:', err);
-          this.markMseFailed();
-        }
-      }, { once: true });
-      // Expose the MSE URL so the UI binds <video src=this>.
-      this.state = { ...this.state, playbackUrl: this.mseUrl };
-      this.emitState();
-    } catch (err) {
-      console.warn('[watch-party] MSE setup failed; using Blob fallback:', err);
-      this.markMseFailed();
-    }
-  }
-
-  private flushMseQueue(): void {
-    const sb = this.mseSourceBuffer;
-    if (!sb || this.mseFailed) return;
-    if (sb.updating) return;
-    const next = this.mseQueue.shift();
-    if (!next) return;
-    try {
-      sb.appendBuffer(next);
-    } catch (err) {
-      const head4 = Array.from(next.subarray(0, Math.min(16, next.length)))
-        .map((b) => b.toString(16).padStart(2, '0')).join(' ');
-      console.warn(
-        '[watch-party] appendBuffer failed; falling back to Blob:', err,
-        'chunkBytes=', next.length, 'firstBytes=', head4,
-      );
-      this.markMseFailed();
-    }
-  }
-
-  /**
-   * Tear down a partially-engaged MSE pipeline mid-stream and revert
-   * the UI to 'still receiving' state. Caller has already set or
-   * will set this.mseFailed = true. Without this, the receiver's
-   * <video> stays bound to the broken MediaSource URL and shows a
-   * decode error until file-end finally binds the Blob URL.
-   */
-  private markMseFailed(): void {
-    this.mseFailed = true;
-    this.tearDownMse();
-    // Drop the broken URL so the panel stops showing the
-    // 'streaming progressively' status and goes back to the
-    // 'receiving file' progress bar until full receipt.
-    if (this.state.playbackUrl) {
-      this.state = { ...this.state, playbackUrl: null };
-      this.emitState();
-    }
-  }
-
-  private tearDownMse(): void {
-    if (this.mseUrl) {
-      try { URL.revokeObjectURL(this.mseUrl); } catch { /* ignore */ }
-      this.mseUrl = null;
-    }
-    this.mse = null;
-    this.mseSourceBuffer = null;
-    this.mseQueue = [];
-    this.mseAppendedThrough = 0;
   }
 
   private handleFileEnd(
@@ -1857,63 +1306,22 @@ class WatchPartyService {
     }
     // Strip codec/vendor parameters from the mime for the Blob and
     // synthesized File. The browser's <video> only needs the base
-    // type ('video/mp4'); the full codec string with mp4box's
-    // 'profiles' extension confuses canPlayType heuristics on some
-    // browsers and isn't useful here.
+    // type ('video/mp4'); the full codec string would only confuse
+    // canPlayType heuristics.
     const baseType = (this.receiveMimeType.split(';')[0] || 'video/mp4').trim();
     const blob = new Blob(parts, { type: baseType });
     const file = new File([blob], this.receiveFileName, { type: baseType });
-    console.log(
-      '[watch-party] file-end: assembled', blob.size, 'bytes type=', this.receiveMimeType,
-      'mseVerdict=', this.mseStreamableVerdict, 'mseFailed=', this.mseFailed,
-    );
 
-    if (this.mseStreamableVerdict === 'yes' && !this.mseFailed && this.mse) {
-      // MSE mode: drain any remaining queued chunks, then signal EOS.
-      // Don't blob-URL the file; the playbackUrl (MSE URL) is what the
-      // <video> is bound to. Still attach the file to state so the
-      // 'save' affordance has something to work with.
-      this.flushMseQueue();
-      const tryEnd = () => {
-        if (this.mseEnded || !this.mse) return;
-        if (this.mseSourceBuffer?.updating || this.mseQueue.length > 0) {
-          // Still draining; come back when the next updateend fires.
-          if (this.mseSourceBuffer) {
-            this.mseSourceBuffer.addEventListener('updateend', tryEnd, { once: true });
-          }
-          return;
-        }
-        try {
-          this.mse.endOfStream();
-          this.mseEnded = true;
-        } catch (err) {
-          console.warn('[watch-party] endOfStream failed:', err);
-        }
-      };
-      tryEnd();
-      this.state = { ...this.state, localFile: file, mode: 'local' };
-    } else {
-      // Fallback: bind a Blob URL to playbackUrl so the player picks it
-      // up. Tear down any half-built MSE state first.
-      this.tearDownMse();
-      if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
-      this.receivedBlobUrl = URL.createObjectURL(blob);
-      console.log(
-        '[watch-party] file-end fallback: blobUrl=', this.receivedBlobUrl,
-        'baseType=', baseType, 'localFileSet=true',
-      );
-      this.state = {
-        ...this.state,
-        localFile: file,
-        mode: 'local',
-        // Bind playbackUrl directly to the Blob URL we just minted.
-        // Previously we left this null and relied on the UI's
-        // useEffect to call URL.createObjectURL(localFile), but that
-        // indirection had subtle timing issues if React batched the
-        // state update. Source-of-truth is the service.
-        playbackUrl: this.receivedBlobUrl,
-      };
-    }
+    if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
+    this.receivedBlobUrl = URL.createObjectURL(blob);
+    this.state = {
+      ...this.state,
+      localFile: file,
+      mode: 'local',
+      // Bind playbackUrl directly to the Blob URL. The UI <video>
+      // picks this up on the next render.
+      playbackUrl: this.receivedBlobUrl,
+    };
     this.receiveBuffers.clear();
     this.emitState();
     this.broadcastPeerState();
@@ -1951,137 +1359,8 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-// -------- F-progressive (MSE) helpers --------
 
-const MSE_CODEC_CANDIDATES_MP4 = [
-  'video/mp4; codecs="avc1.640028,mp4a.40.2"',
-  'video/mp4; codecs="avc1.64001f,mp4a.40.2"',
-  'video/mp4; codecs="avc1.4d401e,mp4a.40.2"',
-  'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
-  'video/mp4; codecs="avc1.640028"',
-  'video/mp4; codecs="avc1.42E01E"',
-];
-const MSE_CODEC_CANDIDATES_WEBM = [
-  'video/webm; codecs="vp9,opus"',
-  'video/webm; codecs="vp8,vorbis"',
-  'video/webm; codecs="vp9"',
-  'video/webm; codecs="vp8"',
-];
-
-function pickMseCodec(mediaType: string): string | null {
-  if (typeof MediaSource === 'undefined') return null;
-  // mp4box.js's info.mime sometimes includes vendor extensions like
-  // 'video/mp4; codecs="..."; profiles="isom,iso2,avc1,mp41"'.
-  // MediaSource.isTypeSupported is happy with the codecs param but
-  // rejects the trailing 'profiles' (and any other non-standard
-  // attribute), throwing later inside addSourceBuffer. Strip down to
-  // type/subtype + codecs only.
-  const cleaned = sanitizeCodecMime(mediaType);
-  if (cleaned) {
-    try {
-      if (MediaSource.isTypeSupported(cleaned)) return cleaned;
-    } catch { /* fall through to candidate list */ }
-  }
-  const candidates = mediaType.includes('webm')
-    ? MSE_CODEC_CANDIDATES_WEBM
-    : MSE_CODEC_CANDIDATES_MP4;
-  for (const c of candidates) {
-    if (MediaSource.isTypeSupported(c)) return c;
-  }
-  return null;
-}
-
-/**
- * Reduce a 'video/mp4; codecs="..."; vendor="..."; ...' mime to just
- * 'video/mp4; codecs="..."'. Returns null if there is no codecs param
- * (caller falls back to candidate list).
- */
-function sanitizeCodecMime(mediaType: string): string | null {
-  const parts = mediaType.split(';').map((p) => p.trim()).filter(Boolean);
-  if (parts.length === 0) return null;
-  const base = parts[0];
-  const codecs = parts.find((p) => p.startsWith('codecs='));
-  if (!codecs) return null;
-  return `${base}; ${codecs}`;
-}
-
-/**
- * Sniff the first received bytes to decide whether the container is
- * progressively-decodable via MSE. Used to decide whether to try MSE
- * or fall back to wait-for-full-receipt.
- *
- * - WebM: always yes. WebM is structured as init segment + clusters
- *   that MSE accepts directly.
- *
- * - mp4: yes iff this is FRAGMENTED mp4 (fmp4 / CMAF). Detected by an
- *   `mvex` box inside `moov`. Regular mp4 with moov-first looks
- *   streamable but is NOT MSE-compatible: it has one giant `mdat`
- *   that you can't feed to appendBuffer in arbitrary slices. Many
- *   sources call this 'progressive mp4' which is a misnomer for our
- *   purposes; only fmp4 / CMAF is actually progressive over MSE.
- *
- *   This is the canonical MSE gotcha. Quoting Mozilla:
- *     "Source buffers expect data in fragmented mp4 (fmp4) form ...
- *      a regular mp4 file will result in a QuotaExceededError or
- *      InvalidStateError."
- *
- * - Anything else: no.
- */
-export function isStreamableContainer(mediaType: string, head: Uint8Array): boolean {
-  if (mediaType.includes('webm')) return true;
-  if (!mediaType.includes('mp4')) return false;
-  // Walk top-level boxes looking for moov, then check if it has mvex.
-  // mvex (movie-extends) declares this is fragmented; without it, the
-  // mp4 is monolithic and not MSE-streamable.
-  let offset = 0;
-  while (offset + 8 <= head.length) {
-    const size =
-      (head[offset] << 24) | (head[offset + 1] << 16)
-      | (head[offset + 2] << 8) | head[offset + 3];
-    const type = String.fromCharCode(
-      head[offset + 4], head[offset + 5], head[offset + 6], head[offset + 7],
-    );
-    if (type === 'mdat') return false; // mdat before moov: not even moov-first
-    if (type === 'moov') {
-      // Walk children of moov looking for mvex.
-      const moovEnd = offset + (size === 0 ? head.length - offset : size);
-      let inner = offset + 8;
-      while (inner + 8 <= Math.min(moovEnd, head.length)) {
-        const innerSize =
-          (head[inner] << 24) | (head[inner + 1] << 16)
-          | (head[inner + 2] << 8) | head[inner + 3];
-        const innerType = String.fromCharCode(
-          head[inner + 4], head[inner + 5], head[inner + 6], head[inner + 7],
-        );
-        if (innerType === 'mvex') return true;
-        if (innerSize < 8) return false;
-        inner += innerSize;
-      }
-      return false; // moov was found but had no mvex -> not fragmented
-    }
-    if (size === 1) {
-      if (offset + 16 > head.length) return false;
-      const hi =
-        (head[offset + 8] << 24) | (head[offset + 9] << 16)
-        | (head[offset + 10] << 8) | head[offset + 11];
-      const lo =
-        (head[offset + 12] << 24) | (head[offset + 13] << 16)
-        | (head[offset + 14] << 8) | head[offset + 15];
-      const big = hi * 2 ** 32 + (lo >>> 0);
-      if (big <= 0 || big > head.length - offset) return false;
-      offset += big;
-    } else if (size === 0) {
-      return false;
-    } else if (size < 8) {
-      return false;
-    } else {
-      offset += size;
-    }
-  }
-  return false;
-}
-
-// -------- Resume helpers (F-resume) --------
+// -------- Resume helpers (persistent playback position) --------
 
 // localStorage key prefix for resume entries. We keep the prefix
 // stable so we can sweep stale entries on read.
