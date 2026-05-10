@@ -230,12 +230,12 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   const [streamTracks, setStreamTracks] = useState(0);
   const [paused, setPaused] = useState(true);
   const [decodeError, setDecodeError] = useState<string | null>(null);
-  // Followers start muted so the drift loop's silent play() call
-  // satisfies browser autoplay policy (muted autoplay is universally
-  // allowed; unmuted requires Media Engagement). User clicks the
-  // unmute button to hear audio. Twitch / YouTube / Disney+ all do
-  // this for live-stream first-load.
-  const [followerMuted, setFollowerMuted] = useState(true);
+  // Mute state for the follower video. Default UNMUTED (user wants
+  // sound). The drift loop attempts unmuted play first and falls back
+  // to muted if the browser denies autoplay; we mirror the actual
+  // element state via the volumechange event so this stays in sync.
+  // Also wired to a manual toggle pill in the player overlay.
+  const [followerMuted, setFollowerMuted] = useState(false);
 
   // Convert the File to an object URL exactly once. Revoke on unmount
   // to free the kernel-side resources.
@@ -272,6 +272,7 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     };
     const onPlay = () => { setPaused(false); updateTracks(); };
     const onPause = () => { setPaused(true); updateTracks(); };
+    const onVolumeChange = () => { setFollowerMuted(el.muted); };
     const onError = () => {
       const err = el.error;
       const msg = err?.code === 4
@@ -281,12 +282,15 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     };
     el.addEventListener('play', onPlay);
     el.addEventListener('pause', onPause);
+    el.addEventListener('volumechange', onVolumeChange);
     el.addEventListener('error', onError);
     const i = window.setInterval(updateTracks, 500);
     updateTracks();
+    onVolumeChange();
     return () => {
       el.removeEventListener('play', onPlay);
       el.removeEventListener('pause', onPause);
+      el.removeEventListener('volumechange', onVolumeChange);
       el.removeEventListener('error', onError);
       clearInterval(i);
     };
@@ -413,31 +417,32 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
               onClick={() => {
                 const el = videoRef.current;
                 if (!el) return;
-                el.muted = true; // guarantee autoplay allowed
-                setFollowerMuted(true);
-                el.play().catch(() => {});
+                // Try unmuted first (user gesture grants
+                // autoplay-with-sound exemption); fall back to muted
+                // if even the gesture path is denied for some reason.
+                el.play().catch(() => {
+                  el.muted = true;
+                  el.play().catch(() => {});
+                });
               }}
               className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white"
             >
               <span className="text-2xl">▶</span>
               <span className="text-sm font-medium">Click to start watching</span>
-              <span className="text-[11px] text-slate-300">
-                Will start muted; tap the speaker icon for audio.
-              </span>
             </button>
           )}
-          {!isHost && !paused && followerMuted && !decodeError && (
+          {!isHost && !paused && !decodeError && (
             <button
               onClick={() => {
                 const el = videoRef.current;
                 if (!el) return;
-                el.muted = false;
-                setFollowerMuted(false);
+                el.muted = !el.muted;
+                // volumechange listener will sync state.
               }}
               className="absolute bottom-2 right-2 px-3 py-1.5 rounded-full text-xs font-medium bg-black/70 hover:bg-black/90 text-white border border-white/20"
-              title="Unmute"
+              title={followerMuted ? 'Unmute' : 'Mute'}
             >
-              🔇 Tap to unmute
+              {followerMuted ? '🔇 Tap to unmute' : '🔊 Mute'}
             </button>
           )}
         </div>

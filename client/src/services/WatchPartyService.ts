@@ -1109,11 +1109,19 @@ class WatchPartyService {
       }
 
       // Honor playing state from host. If host says play and we're
-      // paused, attempt play(); a rejection (autoplay) is surfaced as
-      // an error so the UI can show a click-to-play overlay.
+      // paused, attempt play(). Try unmuted first (the user wanted
+      // sound by default); if the browser denies autoplay-with-sound
+      // (no Media Engagement Index), fall back to muted autoplay
+      // which is universally allowed. The UI shows a 'tap to unmute'
+      // pill so the user can grant audio with one click.
       if (tl.playing && el.paused && el.readyState >= 2) {
         el.play().catch(() => {
-          this.surfaceError('Click the video to enable playback (browser autoplay policy).');
+          if (!el.muted) {
+            el.muted = true;
+            el.play().catch(() => {
+              this.surfaceError('Click the video to enable playback (browser autoplay policy).');
+            });
+          }
         });
       } else if (!tl.playing && !el.paused) {
         el.pause();
