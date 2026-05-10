@@ -349,20 +349,9 @@ class WatchPartyService {
         } else {
           this.sendTimeline(peerId);
         }
-        // Mode C late-joiner. Two flavors:
-        //  - byte-stream mode: just (re-)announce wp-bytes-init.
-        //  - chunked-forward: kick a per-peer forward. Skip if prep
-        //    is still running (callback in startAsHost handles it).
+        // Mode C late-joiner: announce byte-stream session.
         if (this.state.mode === 'forward' && this.forwardSourceFile) {
-          const useByteStream = (() => {
-            try { return localStorage.getItem('sendie_wp_stream') === '1'; }
-            catch { return false; }
-          })();
-          if (useByteStream) {
-            this.sendBytesInit(peerId);
-          } else if (this.state.prepStatus === null) {
-            void this.startForwardTo(peerId);
-          }
+          this.sendBytesInit(peerId);
         }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
         this.broadcastPeerState();
@@ -503,38 +492,18 @@ class WatchPartyService {
     } else if (mode === 'forward') {
       this.forwardSourceFile = file;
       this.startHeartbeat();
-      // Two host strategies for forward mode:
+      // Mode C2: byte-range stream via Service Worker proxy on the
+      // receiver. Host announces wp-bytes-init and waits for range
+      // requests. Receiver's <video src=/wp-stream/<id>> issues range
+      // fetches that the SW translates to data-channel round-trips.
+      // Browser's own demuxer parses the file; works for any
+      // container the browser plays directly (mp4 / mov / mkv / webm
+      // — fmp4 not required, no transmux needed).
       //
-      // (a) byte-range stream (Mode C2): announce wp-bytes-init and
-      //     wait for receivers to ask for ranges. Receiver uses a
-      //     Service Worker as a fake server backing <video src=>.
-      //     Browser's own demuxer handles parsing; works for any
-      //     container the browser plays directly. Time-to-first-frame
-      //     is just the round-trip + first-range download.
-      //     Feature-flagged on localStorage.sendie_wp_stream=1.
-      //
-      // (b) classic chunked forward (Mode C1): transfer all bytes,
-      //     receiver assembles a Blob, then plays. Default. Reliable
-      //     across all browsers.
-      const useByteStream = (() => {
-        try { return localStorage.getItem('sendie_wp_stream') === '1'; }
-        catch { return false; }
-      })();
-      if (useByteStream) {
-        // (a) Announce immediately. Late joiners are also picked up
-        // in onDataChannelOpen below.
-        for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
-          if (peerId === myPeerId) continue;
-          this.sendBytesInit(peerId);
-        }
-      } else {
-        // (b) Classic chunked path with optional transmux preflight.
-        void this.runHostPrep(file).then(() => {
-          for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
-            if (peerId === myPeerId) continue;
-            void this.startForwardTo(peerId);
-          }
-        });
+      // Late joiners are also picked up in onDataChannelOpen below.
+      for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
+        if (peerId === myPeerId) continue;
+        this.sendBytesInit(peerId);
       }
     }
     // For stream mode: the UI must call attachStreamSourceElement() with
@@ -1529,6 +1498,8 @@ class WatchPartyService {
    *
    * Enable per-host by setting localStorage.sendie_wp_transmux=1.
    */
+  // @ts-expect-error retained for potential rollback to chunked forward;
+  // see docs/transmuxing-research.md autopsy section.
   private async runHostPrep(file: File): Promise<void> {
     const enabled = (() => {
       try { return localStorage.getItem('sendie_wp_transmux') === '1'; }
@@ -1562,6 +1533,7 @@ class WatchPartyService {
     }
   }
 
+  // @ts-expect-error retained for potential rollback; see runHostPrep above.
   private async startForwardTo(peerId: string): Promise<void> {
     const file = this.forwardSourceFile;
     if (!file || this.state.role !== 'host') return;
