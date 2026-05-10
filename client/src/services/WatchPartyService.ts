@@ -1179,6 +1179,15 @@ class WatchPartyService {
     // 'expected' advances. 800 ms is enough for most decoders to
     // resume playback after a seek.
     let seekCooldownUntil = 0;
+    // Throttle rate adjustments. Browsers apply a small audio
+    // resample on every playbackRate change; doing it at 60 Hz
+    // produces audible micro-pitch-jitter and visible motion judder.
+    // We only allow a rate-nudge once per RATE_THROTTLE_MS, with a
+    // deadband around drift=0 where we fully restore host_rate
+    // and stop nudging entirely.
+    let lastRateChangeAt = 0;
+    const RATE_THROTTLE_MS = 1000;
+    const DEADBAND_S = 0.05;
     // rVFC support detection. Safari 16.4+, Chrome 83+, Firefox 132+.
     type FrameMeta = { mediaTime: number };
     type RVFCEl = HTMLVideoElement & {
@@ -1228,21 +1237,39 @@ class WatchPartyService {
         }
         // Reset to host rate; rate nudges from before the seek would
         // compound otherwise.
-        if (el.playbackRate !== tl.playbackRate) el.playbackRate = tl.playbackRate;
-      } else if (canMeasure && !inSeekCooldown && Math.abs(drift) >= SOFT_DRIFT_S) {
+        if (Math.abs(el.playbackRate - tl.playbackRate) > 0.005) {
+          el.playbackRate = tl.playbackRate;
+          lastRateChangeAt = localNow * 1000;
+        }
+      } else if (
+        canMeasure
+        && !inSeekCooldown
+        && Math.abs(drift) >= SOFT_DRIFT_S
+        && (localNow * 1000 - lastRateChangeAt) >= RATE_THROTTLE_MS
+      ) {
         // Rate nudge proportional to drift magnitude. A 100 ms drift
         // (right at the soft threshold) gets ~1% nudge; a 400 ms
         // drift hits the full 5% cap. Linear ramp between.
-        // Critically: target is host_rate +/- delta, not
-        // current_rate * (1 +/- delta), so we never compound across
-        // 60 Hz frame ticks.
+        // Throttled to at most once per RATE_THROTTLE_MS so audio
+        // doesn't pitch-jitter from per-frame resamples.
         const magnitude = Math.min(1, Math.abs(drift) / HARD_DRIFT_S);
         const delta = RATE_NUDGE_MAX * magnitude;
         const target = tl.playbackRate * (1 - delta * Math.sign(drift));
-        if (Math.abs(el.playbackRate - target) > 0.005) el.playbackRate = target;
-      } else if (canMeasure && Math.abs(el.playbackRate - tl.playbackRate) > 0.005) {
-        // In sync; restore host rate exactly.
+        if (Math.abs(el.playbackRate - target) > 0.005) {
+          el.playbackRate = target;
+          lastRateChangeAt = localNow * 1000;
+        }
+      } else if (
+        canMeasure
+        && Math.abs(drift) < DEADBAND_S
+        && Math.abs(el.playbackRate - tl.playbackRate) > 0.005
+        && (localNow * 1000 - lastRateChangeAt) >= RATE_THROTTLE_MS
+      ) {
+        // In the deadband and not at host rate: restore host rate
+        // exactly. Throttled the same as nudges so we don't toggle
+        // rate every frame as drift crosses the deadband edge.
         el.playbackRate = tl.playbackRate;
+        lastRateChangeAt = localNow * 1000;
       }
 
       // Honor playing state from host. If host says play and we're
