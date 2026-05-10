@@ -392,6 +392,23 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   // survives switching tabs; sync continues because the underlying
   // <video> element doesn't move (only its rendering surface does).
   const pipSupported = typeof document !== 'undefined' && document.pictureInPictureEnabled;
+  const [inPip, setInPip] = useState(false);
+  // Keep the inPip flag in sync with the actual element via the
+  // 'enterpictureinpicture' / 'leavepictureinpicture' events. Without
+  // this, the user can exit PiP via the browser's own X button and our
+  // label gets stale.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const onEnter = () => setInPip(true);
+    const onLeave = () => setInPip(false);
+    el.addEventListener('enterpictureinpicture', onEnter);
+    el.addEventListener('leavepictureinpicture', onLeave);
+    return () => {
+      el.removeEventListener('enterpictureinpicture', onEnter);
+      el.removeEventListener('leavepictureinpicture', onLeave);
+    };
+  }, [objectUrl]);
   const handlePip = async () => {
     const el = videoRef.current;
     if (!el) return;
@@ -431,9 +448,9 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             <button
               onClick={handlePip}
               className="px-2 py-1 rounded text-xs text-slate-300 hover:text-slate-100 hover:bg-white/5 transition-colors"
-              title="Picture-in-Picture (pop video into a floating window)"
+              title={inPip ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (pop video into a floating window)'}
             >
-              ⧉ PiP
+              {inPip ? '⧉ Exit PiP' : '⧉ PiP'}
             </button>
           )}
           <button
@@ -577,6 +594,14 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
         </p>
       )}
 
+      {/* Receiver progressive-playback status. When MSE is active and
+          the transfer is still in flight, the player has already
+          started but the user might wonder whether they're missing
+          bytes. Show the receive percentage so the answer is visible. */}
+      {!isHost && state.playbackUrl && state.mode === 'forward' && (
+        <ProgressiveStatus state={state} />
+      )}
+
       {/* Custom seekbar / rate picker for the host, since the service
           intercepts these to apply lookahead reservation. Followers
           see a read-only progress strip with peer dots. */}
@@ -614,6 +639,12 @@ interface HostControlsProps {
 function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSeek, onRate, peers, selfPeerId }: HostControlsProps) {
   const [paused, setPaused] = useState(true);
   const [time, setTime] = useState(0);
+  // Friendly-name lookup for the per-peer dot tooltips on the
+  // seekbar. Mirrors PeerStrip's labelFor.
+  const peerStore = useAppStore((s) => s.peers);
+  const labelFor = (peerId: string): string => {
+    return peerStore.get(peerId)?.friendlyName ?? peerId.slice(0, 8);
+  };
 
   // Drive the time slider from the underlying element.
   useEffect(() => {
@@ -699,7 +730,7 @@ function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSee
                     key={p.peerId}
                     className={`absolute h-2 w-2 rounded-full border border-slate-900 -translate-x-1/2 ${color}`}
                     style={{ left: `${pct}%` }}
-                    title={`${p.peerId.slice(0, 8)}: ${fmtTime(p.mediaTime!)}`}
+                    title={`${labelFor(p.peerId)}: ${fmtTime(p.mediaTime!)}`}
                   />
                 );
               })}
@@ -809,6 +840,17 @@ function LateJoinerToast({ peerId, onDismiss }: { peerId: string; onDismiss: () 
         </button>
       </span>
     </div>
+  );
+}
+
+function ProgressiveStatus({ state }: { state: WatchPartyState }) {
+  const hostId = state.hostPeerId ?? '';
+  const pct = Math.round(((state.forwardProgress.get(hostId) ?? 0) * 100));
+  if (pct >= 100) return null;
+  return (
+    <p className="text-[11px] text-slate-500">
+      Streaming progressively while we receive — {pct}% of the file delivered.
+    </p>
   );
 }
 

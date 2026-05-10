@@ -1536,7 +1536,7 @@ class WatchPartyService {
       }
     }
     if (this.mseStreamableVerdict === 'yes' && !this.mseFailed) {
-      this.queueChunkForMse(msg.chunkIndex);
+      this.queueChunksForMse();
     }
 
     if (received % WatchPartyService.PROGRESS_ACK_EVERY === 0 || received === total) {
@@ -1589,7 +1589,7 @@ class WatchPartyService {
    * them for SourceBuffer.appendBuffer. Drain the queue as the
    * SourceBuffer becomes idle.
    */
-  private queueChunkForMse(_arrivedIndex: number): void {
+  private queueChunksForMse(): void {
     while (true) {
       const next = this.receiveBuffers.get(this.mseAppendedThrough);
       if (!next) break;
@@ -1604,7 +1604,18 @@ class WatchPartyService {
       this.mse = new MediaSource();
       this.mseUrl = URL.createObjectURL(this.mse);
       this.mseAppendedThrough = 0;
+      // Failsafe: if 'sourceopen' never fires (some browsers race when
+      // the URL is bound before the element is in the DOM), give up
+      // and fall back to Blob assembly. 5 s is generous; on a healthy
+      // path it fires within ~10 ms of the <video src=> assignment.
+      const failsafe = window.setTimeout(() => {
+        if (!this.mseSourceBuffer && !this.mseFailed) {
+          console.warn('[watch-party] MSE sourceopen never fired; falling back to Blob');
+          this.mseFailed = true;
+        }
+      }, 5000);
       this.mse.addEventListener('sourceopen', () => {
+        clearTimeout(failsafe);
         if (!this.mse) return;
         try {
           const sb = this.mse.addSourceBuffer(codec);
