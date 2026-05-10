@@ -1,23 +1,37 @@
-# Sendie - P2P File Transfer
+# Sendie - P2P File Transfer & Watch Party
 
-Secure, browser-based peer-to-peer file transfer using WebRTC.
+Secure, browser-based peer-to-peer file transfer, voice, screen-share, and synced video watch-parties using WebRTC.
 
 ## Features
 
-- 🔒 **End-to-End Encrypted** - WebRTC DTLS between browsers, with SAS-code identity verification bound to the DTLS fingerprint to defend against an active man-in-the-middle
-- 👥 **Multi-Peer Sessions** - Share files with up to 10 people simultaneously
-- 🚀 **No Size Limits** - Transfer files of any size (limited only by browser/device)
-- 👤 **No Account Required to Join** - Recipients just need the session link (no login)
-- 🔐 **Allow-Listed Session Creation** - Only approved Discord accounts can create sessions
-- ⚡ **Direct P2P** - Files transfer directly between browsers, never touch a server
-- 🔐 **Identity Verification** - Bound SAS code (compare 4 words out-of-band) authenticates the encrypted channel itself, not just the keys exchanged through it
-- 👑 **Host Controls** - Session creators can lock sessions, kick peers, and restrict sending (enforced on both sender and receiver)
-- 📋 **File Queue** - Queue files before anyone joins, auto-send when they connect
-- 📡 **Broadcast Mode** - Automatically send files to every new person who joins
-- ✅ **Per-File Consent** - Recipients explicitly accept each incoming file by default; auto-receive is opt-in
-- 📤 **Host-Only Sending** - Optionally restrict file sending to host only
+### File transfer
+- 🔒 **End-to-end encrypted** — WebRTC DTLS between browsers, with bound SAS-code identity verification (compare 4 words out of band) that defends against an active man-in-the-middle attack on the encrypted channel itself
+- 👥 **Multi-peer mesh** — up to 10 people in a session, full peer-to-peer mesh, no relay
+- 🚀 **No size limit** — files of any size, limited only by browser/device. Large incoming files write directly to disk via the File System Access API or StreamSaver fallback
+- ⚡ **Direct P2P** — files never touch a server
+- 📋 **File queue** — queue files before peers join; auto-send on connect
+- 📡 **Broadcast mode** — auto-send queued files to every new peer who joins
+- ✅ **Per-file consent** — recipients accept each incoming file by default; auto-receive is opt-in (default on)
+- 👑 **Host controls** — lock the session, kick peers, restrict sending to host only
 
-> **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files) but not anonymous (peers see each other's IPs). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work as it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for details.
+### Voice, camera, screen share
+- 🎙️ **Voice chat** — push-to-talk or always-on, with mute toggles and per-peer audio meters
+- 📷 **Camera** — share video with the room; per-peer mute and live previews
+- 🖥️ **Screen share** — share an entire screen, a window, or a browser tab. Tab/system audio capture supported on Chromium-family browsers; encoder cap of 4 receivers to prevent thermal throttling
+
+### Synced media playback (watch party)
+- 🎬 **Watch together** — pick a video file as the host, Sendie sends the bytes to every peer over the existing data channel, then the room watches together with synced play, pause, seek, and playback rate
+- ⏪⏩ **Skip 10s** — host buttons that propagate to every viewer
+- 💾 **Resume position** — leave and return; "Resume at 47:18?" prompt
+- 👋 **Late-joiner rewind** — host gets a "rewind for everyone?" toast when a late peer finishes receiving
+- 📁 **Local-file mode** — alternative for rooms that already have the file on disk; skips the transfer
+
+### Identity & access
+- 🔐 **Allow-listed session creation** — only approved Discord accounts can host sessions
+- 👤 **No account required to join** — recipients just need the session link
+- 🔐 **Bound SAS verification** — the 4-word compare authenticates the encrypted channel, not just the keys
+
+> **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files, voice, or video) but not anonymous (peers see each other's IPs because P2P requires it). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work; it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for the full picture.
 
 ## Quick Start
 
@@ -94,10 +108,10 @@ Open http://localhost:5173 in your browser.
                      └───────────────────┘
 ```
 
-- **Server**: Only handles signaling (session setup, ICE candidates)
-- **File Data**: Transfers directly between browsers via WebRTC
-- **Encryption**: DTLS encryption is automatic with WebRTC
-- **Topology**: Full mesh - each peer connects to all others (max ~10 peers)
+- **Server**: Only handles signaling (session setup, ICE candidates) and Discord OAuth
+- **File data, voice, video, screen, watch-party**: All flow peer-to-peer over WebRTC; never touches the server
+- **Encryption**: DTLS is automatic with WebRTC; bound SAS verification protects the channel itself
+- **Topology**: Full mesh (each peer connects to all others). Practical max ~10 peers; voice / camera / watch-party-stream cap somewhere lower depending on host hardware
 
 ## Project Structure
 

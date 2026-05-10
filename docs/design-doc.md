@@ -1,21 +1,39 @@
 # Sendie - P2P File Transfer Application Design Document
 
+> **Status update (May 2026).** This document was originally written when
+> Sendie was a file-transfer-only product. The mesh topology, signaling,
+> auth, and session-lifecycle sections still describe the live system
+> accurately. Real-time additions built on top of the same transport are
+> documented in their own proposals and are summarized below; treat those
+> proposals as the source of truth for those subsystems:
+>
+> - Voice chat: [docs/realtime-av-and-rich-chat-proposal.md](realtime-av-and-rich-chat-proposal.md)
+> - Camera and screen share: [docs/screen-sharing-proposal.md](screen-sharing-proposal.md)
+> - Synced media playback (watch party): [docs/synced-media-playback-proposal.md](synced-media-playback-proposal.md)
+> - Session lifecycle (lock, kick, host-only): [docs/session-lifecycle-proposal.md](session-lifecycle-proposal.md)
+> - Discord auth: [docs/discord-auth-proposal.md](discord-auth-proposal.md)
+>
+> All of these reuse the same WebRTC peer connections and signaling that
+> file transfer uses. The architecture diagrams below remain valid.
+
 ## Overview
 
-Sendie is a browser-based peer-to-peer file transfer application that enables direct, encrypted file sharing between users without files ever touching a server. The application leverages WebRTC for establishing secure peer connections and data transfer.
+Sendie is a browser-based peer-to-peer collaboration application: file transfer, voice, camera, screen share, and synced video playback (watch party), all directly between browsers with no server-side data. The application leverages WebRTC for establishing secure peer connections; the server only does signaling and Discord OAuth.
 
 ### Goals
 
-- **Direct Transfer**: Files transfer directly between browsers—no server storage
-- **End-to-End Encryption**: All transfers encrypted via DTLS (built into WebRTC)
-- **Multi-Peer Sessions**: Share files with multiple people simultaneously (up to 10 peers)
-- **No Account Required**: Anonymous, session-based file sharing (auth only for creation)
-- **Large File Support**: Handle files of any size (limited only by browser/device capability)
-- **NAT Traversal**: Seamlessly connect peers behind firewalls and NATs
-- **Identity Verification**: Optional cryptographic verification to prevent MITM attacks
-- **File Queuing**: Queue files before peers join, auto-send on connect
-- **Broadcast Mode**: Send files to all new joiners automatically
-- **Receiver Control**: Recipients can disable auto-receive for incoming files
+- **Direct transfer**: files / voice / video / screen / watch-party media flow directly between browsers, no server storage
+- **End-to-end encryption**: DTLS (data channels) and SRTP (media tracks), both built into WebRTC
+- **Multi-peer mesh**: full mesh topology, up to 10 peers per session
+- **No account required to join**: anonymous, session-based; auth only for session creation
+- **Large file support**: files of any size, limited only by browser/device
+- **NAT traversal**: STUN, falling back to TURN
+- **Identity verification**: bound SAS code (4-word out-of-band compare) authenticates the encrypted channel itself, defending against an active MITM
+- **File queuing**: queue files before peers join; auto-send on connect
+- **Broadcast mode**: auto-send queued files to every new peer who joins
+- **Receiver control**: per-file accept; auto-receive default-on but toggleable
+- **Real-time A/V**: voice chat, camera sharing, screen sharing (with optional tab/system audio on Chromium)
+- **Watch party**: host picks a video file, bytes ship to every peer over the data channel, then the room watches together with synced play / pause / seek / rate / skip-10s and per-host position resume
 
 ---
 
