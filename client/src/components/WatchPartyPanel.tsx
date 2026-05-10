@@ -91,6 +91,7 @@ export function WatchPartyPanel() {
           )}
 
           {/* IDLE state: pick mode then file */}
+          {state.role === 'idle' && <CodecSupportBanner />}
           {state.role === 'idle' && (
             <div className="space-y-3 py-2">
               <p className="text-sm text-slate-300">
@@ -627,6 +628,40 @@ function StreamFollowerView({ state, peers, onLeave }: StreamFollowerProps) {
         )}
       </div>
       <PeerStrip peers={peers} duration={state.mediaDuration} />
+    </div>
+  );
+}
+
+function CodecSupportBanner() {
+  // Probe the most useful container/codec combos. canPlayType returns
+  // 'probably' / 'maybe' / '' (empty); 'maybe' is treated as supported.
+  const probe = (() => {
+    if (typeof document === 'undefined') return null;
+    const v = document.createElement('video');
+    return {
+      h264: !!v.canPlayType('video/mp4; codecs="avc1.42E01E,mp4a.40.2"'),
+      webm: !!v.canPlayType('video/webm; codecs="vp8,vorbis"'),
+    };
+  })();
+  if (!probe) return null;
+  if (probe.h264) return null;
+  return (
+    <div className="text-xs rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 p-2 space-y-1">
+      <p className="font-medium">Heads up: this browser cannot decode H.264 mp4.</p>
+      <p className="text-amber-200/80">
+        Firefox on Linux (and some hardened Linux installs of other browsers) ship without
+        H.264/AAC codecs. mp4 watch parties will fail with &ldquo;No video with supported
+        format and MIME type found.&rdquo; Workarounds:
+      </p>
+      <ul className="list-disc list-inside text-amber-200/80 ml-1">
+        <li>Use Chrome, Edge, or Brave instead (they bundle H.264).</li>
+        {probe.webm && <li>Or use a WebM/VP8 file, which works here.</li>}
+        <li>
+          Or install <code className="font-mono text-amber-100">ffmpeg</code> and{' '}
+          <code className="font-mono text-amber-100">gstreamer-libav</code> at the OS level
+          and restart Firefox.
+        </li>
+      </ul>
     </div>
   );
 }
