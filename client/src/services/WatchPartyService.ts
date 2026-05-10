@@ -211,6 +211,11 @@ class WatchPartyService {
   // drift loop. Hosts ignore this; their authoritative state lives on
   // the video element.
   private lastTimeline: Extract<DataChannelMessage, { type: 'wp-timeline' }> | null = null;
+  // Local-mono timestamp at which we last detected a host-initiated
+  // state change (play/pause/seek/rate). The drift loop checks this
+  // and clears its post-seek cooldown when a host action arrives,
+  // so explicit user actions are never swallowed by the cooldown.
+  private driftSeekCooldownClearedAt = 0;
 
   // -------- Stream mode (Mode B) state --------
 
@@ -730,16 +735,28 @@ class WatchPartyService {
       // controls (e.g. native browser play button, MediaSession).
       const onPlay = () => this.broadcastTimeline({ playing: true });
       const onPause = () => this.broadcastTimeline({ playing: false });
+      // Both 'seeking' (start of scrub) and 'seeked' (final position
+      // after scrub completes) get broadcast. Without 'seeking',
+      // followers only catch up after the host releases the scrubber,
+      // which feels laggy on long drags. Both events are cheap.
+      const onSeeking = () => this.broadcastTimeline();
       const onSeeked = () => this.broadcastTimeline();
+      // Forward playback rate changes too (native browser controls
+      // expose 0.5x/1x/1.5x/2x menus).
+      const onRateChange = () => this.broadcastTimeline({ playbackRate: el.playbackRate });
       const onLoadedMeta = () => this.setMediaDuration(el.duration || 0);
       el.addEventListener('play', onPlay);
       el.addEventListener('pause', onPause);
+      el.addEventListener('seeking', onSeeking);
       el.addEventListener('seeked', onSeeked);
+      el.addEventListener('ratechange', onRateChange);
       el.addEventListener('loadedmetadata', onLoadedMeta);
       return () => {
         el.removeEventListener('play', onPlay);
         el.removeEventListener('pause', onPause);
+        el.removeEventListener('seeking', onSeeking);
         el.removeEventListener('seeked', onSeeked);
+        el.removeEventListener('ratechange', onRateChange);
         el.removeEventListener('loadedmetadata', onLoadedMeta);
         this.videoEl = null;
       };
@@ -955,7 +972,19 @@ class WatchPartyService {
       if (msg.seq < this.lastTimeline.seq) return;
       if (msg.seq === this.lastTimeline.seq && msg.hostPeerId > this.lastTimeline.hostPeerId) return;
     }
+    // Detect a host-initiated state change (play, pause, seek, rate
+    // change). When this fires we want the drift loop to react
+    // immediately, bypassing the post-seek cooldown that exists to
+    // dampen the loop's own corrections. Without this, a host pause
+    // or seek that lands during cooldown would be ignored for up to
+    // 800 ms.
+    const prev = this.lastTimeline;
+    const hostChanged = !prev
+      || prev.playing !== msg.playing
+      || Math.abs(prev.anchorTime - msg.anchorTime) > 0.25
+      || prev.playbackRate !== msg.playbackRate;
     this.lastTimeline = msg;
+    if (hostChanged) this.driftSeekCooldownClearedAt = this.localMono();
     // Update offset estimate.
     this.recordOffsetSample(peerId, msg.hostMono);
     // Refresh metadata if the host learned the duration.
@@ -1078,6 +1107,12 @@ class WatchPartyService {
       // is mid-buffering. Measuring drift here is meaningless and
       // applying corrections feeds the buffering loop.
       const canMeasure = el.readyState >= 3;
+      // Clear the cooldown if a host-initiated state change arrived
+      // since we set it. Explicit user actions should never be
+      // swallowed by drift dampening.
+      if (this.driftSeekCooldownClearedAt * 1000 > seekCooldownUntil - 800) {
+        seekCooldownUntil = 0;
+      }
       const inSeekCooldown = localNow * 1000 < seekCooldownUntil;
 
       if (canMeasure && !inSeekCooldown && Math.abs(drift) >= HARD_DRIFT_S) {
