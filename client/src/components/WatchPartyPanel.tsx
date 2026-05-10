@@ -278,19 +278,18 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   // that URL's lifecycle.
   useEffect(() => {
     if (state.playbackUrl) {
+      console.log('[watch-party] Player: binding playbackUrl=', state.playbackUrl, 'localFile?', !!state.localFile);
       setObjectUrl(state.playbackUrl);
       return;
     }
     if (!state.localFile) {
-      // MSE was torn down (mid-stream failure) and the assembled
-      // Blob isn't ready yet. Drop the URL and clear any decode
-      // error so the panel cleanly reverts to the 'receiving' UI
-      // until file-end binds a real Blob URL.
+      console.log('[watch-party] Player: no source; clearing');
       setObjectUrl(null);
       setDecodeError(null);
       return;
     }
     const url = URL.createObjectURL(state.localFile);
+    console.log('[watch-party] Player: minted Blob URL from localFile=', url);
     setObjectUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [state.localFile, state.playbackUrl]);

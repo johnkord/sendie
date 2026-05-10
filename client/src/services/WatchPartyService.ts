@@ -887,6 +887,11 @@ class WatchPartyService {
     // crisp.
     const initialSync = () => {
       const tl = this.lastTimeline;
+      console.log(
+        '[watch-party] initialSync: readyState=', el.readyState,
+        'paused=', el.paused, 'currentTime=', el.currentTime,
+        'tl=', tl ? `playing=${tl.playing} anchorTime=${tl.anchorTime}` : 'null',
+      );
       if (!tl) return;
       const anchorMonoLocal = tl.anchorMono - this.hostClockOffset;
       const elapsed = tl.playing ? Math.max(0, this.localMono() - anchorMonoLocal) : 0;
@@ -899,26 +904,47 @@ class WatchPartyService {
       // playing videos. Try unmuted first; muted fallback satisfies
       // browser autoplay policy when no user gesture is in scope.
       if (tl.playing && el.paused) {
-        el.play().catch(() => {
-          if (!el.muted) {
-            el.muted = true;
-            el.play().catch(() => {
-              this.surfaceError('Click the video to start playback.');
-            });
-          }
-        });
+        this.tryPlayWithFallback(el);
       }
     };
     el.addEventListener('canplay', initialSync, { once: true });
-    // Also listen for loadeddata which fires earlier on some browsers
-    // (Safari especially) and ensures we don't miss the kick.
     el.addEventListener('loadeddata', initialSync, { once: true });
+    // The events above fire when the source is loaded enough to play.
+    // If our listener attaches AFTER the browser has already loaded
+    // the source (very fast Blob URL on a remount), readyState is
+    // already >= 2 and the events won't re-fire. Trigger immediately.
+    if (el.readyState >= 2 /* HAVE_CURRENT_DATA */) {
+      console.log('[watch-party] initialSync: readyState already', el.readyState, '; running immediately');
+      initialSync();
+    }
     return () => {
       el.removeEventListener('canplay', initialSync);
       el.removeEventListener('loadeddata', initialSync);
       stop();
       this.videoEl = null;
     };
+  }
+
+  /**
+   * Attempt to play the element. Try unmuted first (the receiver
+   * default UI is unmuted); on autoplay-policy rejection, fall back
+   * to muted play which is universally permitted.
+   */
+  private tryPlayWithFallback(el: HTMLVideoElement): void {
+    el.play().then(() => {
+      console.log('[watch-party] play() unmuted succeeded');
+    }).catch((err) => {
+      console.warn('[watch-party] play() unmuted rejected:', err?.name, err?.message);
+      if (!el.muted) {
+        el.muted = true;
+        el.play().then(() => {
+          console.log('[watch-party] play() muted succeeded after unmuted reject');
+        }).catch((err2) => {
+          console.error('[watch-party] play() muted ALSO rejected:', err2?.name, err2?.message);
+          this.surfaceError('Click the video to start playback.');
+        });
+      }
+    });
   }
 
   // -------- Internal: timeline broadcast --------
@@ -1151,18 +1177,18 @@ class WatchPartyService {
       }
       if (playFlip) {
         if (msg.playing && el.paused) {
-          // Try unmuted first; service-level autoplay fallback flips
-          // to muted if the browser refuses.
-          el.play().catch(() => {
-            if (!el.muted) {
-              el.muted = true;
-              el.play().catch(() => {});
-            }
-          });
+          this.tryPlayWithFallback(el);
         } else if (!msg.playing && !el.paused) {
           el.pause();
         }
       }
+    }
+    // Belt-and-suspenders: even if there was no playFlip (e.g. host
+    // has been playing all along but the receiver remounted between
+    // MSE-failure and Blob-bind), if host says playing and we're
+    // paused with a loaded source, kick off play. Cheap; idempotent.
+    if (this.videoEl && msg.playing && this.videoEl.paused && this.videoEl.readyState >= 2) {
+      this.tryPlayWithFallback(this.videoEl);
     }
     // Update offset estimate.
     this.recordOffsetSample(peerId, msg.hostMono);
