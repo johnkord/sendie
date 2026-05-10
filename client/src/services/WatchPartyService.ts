@@ -1044,18 +1044,49 @@ class WatchPartyService {
       if (msg.seq === this.lastTimeline.seq && msg.hostPeerId > this.lastTimeline.hostPeerId) return;
     }
     // Detect a host-initiated state change (play, pause, seek, rate
-    // change). When this fires we want the drift loop to react
-    // immediately, bypassing the post-seek cooldown that exists to
-    // dampen the loop's own corrections. Without this, a host pause
-    // or seek that lands during cooldown would be ignored for up to
-    // 800 ms.
+    // change) and apply it DIRECTLY to the video element here, instead
+    // of relying on the drift loop's next tick. Direct application is
+    // both faster (no rVFC wait) and more robust (the drift loop's
+    // canMeasure / cooldown gates can't swallow it). The drift loop
+    // continues to handle small ongoing drift after the snap.
     const prev = this.lastTimeline;
-    const hostChanged = !prev
-      || prev.playing !== msg.playing
-      || Math.abs(prev.anchorTime - msg.anchorTime) > 0.25
-      || prev.playbackRate !== msg.playbackRate;
+    const seekJump = !prev || Math.abs(prev.anchorTime - msg.anchorTime) > 0.25;
+    const playFlip = !prev || prev.playing !== msg.playing;
+    const rateChange = !prev || prev.playbackRate !== msg.playbackRate;
+    const hostChanged = seekJump || playFlip || rateChange;
     this.lastTimeline = msg;
     if (hostChanged) this.driftSeekCooldownClearedAt = this.localMono();
+    if (hostChanged && this.videoEl) {
+      const el = this.videoEl;
+      // Compute the host's expected position right now (taking the
+      // lookahead window into account: anchorMono is in the future
+      // from the host's clock, so localNow may be before
+      // anchorMonoLocal -> elapsed clamps to 0 -> we land on
+      // anchorTime exactly, which is what the lookahead is for).
+      const anchorMonoLocal = msg.anchorMono - this.hostClockOffset;
+      const elapsed = msg.playing ? Math.max(0, this.localMono() - anchorMonoLocal) : 0;
+      const expected = msg.anchorTime + elapsed * msg.playbackRate;
+      if (seekJump) {
+        try { el.currentTime = Math.max(0, expected); } catch { /* ignore */ }
+      }
+      if (rateChange && Math.abs(el.playbackRate - msg.playbackRate) > 0.005) {
+        el.playbackRate = msg.playbackRate;
+      }
+      if (playFlip) {
+        if (msg.playing && el.paused) {
+          // Try unmuted first; service-level autoplay fallback flips
+          // to muted if the browser refuses.
+          el.play().catch(() => {
+            if (!el.muted) {
+              el.muted = true;
+              el.play().catch(() => {});
+            }
+          });
+        } else if (!msg.playing && !el.paused) {
+          el.pause();
+        }
+      }
+    }
     // Update offset estimate.
     this.recordOffsetSample(peerId, msg.hostMono);
     // Refresh metadata if the host learned the duration.
