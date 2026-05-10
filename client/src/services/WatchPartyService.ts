@@ -1419,11 +1419,12 @@ class WatchPartyService {
    */
   private async runHostPrep(file: File): Promise<void> {
     try {
-      const { classifyForTransmux, transmuxToFmp4, TRANSMUX_MIN_BYTES } =
-        await import('./watchPartyTransmux');
-      // Below the floor, C1 finishes before transmux would. Skip.
-      if (file.size < TRANSMUX_MIN_BYTES) return;
+      const { classifyForTransmux, transmuxToFmp4 } = await import('./watchPartyTransmux');
+      // Always run the classify check; transmux is sub-second on typical
+      // dogfooding files. The earlier 5 MB floor was hiding the feature
+      // entirely for the small clips most testing actually uses.
       const decision = await classifyForTransmux(file);
+      console.log('[watch-party] host transmux decision:', decision, 'size=', file.size, 'type=', file.type);
       if (decision !== 'transmux') return;
       this.state = { ...this.state, prepStatus: { phase: 'transmux', progress: 0 } };
       this.emitState();
@@ -1434,13 +1435,13 @@ class WatchPartyService {
         };
         this.emitState();
       });
+      console.log('[watch-party] host transmux done; bytes=', blob.size, 'mime=', mediaType);
       // Replace forward source with the transmuxed Blob. Receivers
       // see the new mediaType (fmp4 mime) in wp-file-start, sniff
       // for mvex, and engage MSE.
       this.forwardSourceFile = new File([blob], file.name, { type: mediaType });
     } catch (err) {
       console.warn('[watch-party] host transmux failed; forwarding original bytes:', err);
-      // Fall through with the original file.
     } finally {
       this.state = { ...this.state, prepStatus: null };
       this.emitState();
@@ -1530,6 +1531,10 @@ class WatchPartyService {
   ): void {
     if (this.state.role === 'host') return;
     if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
+    console.log(
+      '[watch-party] file-start: name=', msg.mediaName, 'size=', msg.mediaSize,
+      'type=', msg.mediaType, 'totalChunks=', msg.totalChunks,
+    );
     // Discovery: we weren't in a session and host just kicked off
     // forward.
     this.state = {
@@ -1583,14 +1588,16 @@ class WatchPartyService {
     // bytes (~64 KB) to inspect the container header.
     if (this.mseStreamableVerdict === 'pending' && this.haveLeadingBytes(64 * 1024)) {
       const head = this.assembleLeadingBytes(64 * 1024);
-      if (isStreamableContainer(this.receiveMimeType, head)) {
-        const codec = pickMseCodec(this.receiveMimeType);
-        if (codec && typeof MediaSource !== 'undefined') {
-          this.mseStreamableVerdict = 'yes';
-          this.setupMse(codec);
-        } else {
-          this.mseStreamableVerdict = 'no';
-        }
+      const streamable = isStreamableContainer(this.receiveMimeType, head);
+      const codec = streamable ? pickMseCodec(this.receiveMimeType) : null;
+      console.log(
+        '[watch-party] receiver MSE check: mediaType=', this.receiveMimeType,
+        'streamable=', streamable, 'codec=', codec,
+        'MSE supported=', typeof MediaSource !== 'undefined',
+      );
+      if (streamable && codec && typeof MediaSource !== 'undefined') {
+        this.mseStreamableVerdict = 'yes';
+        this.setupMse(codec);
       } else {
         this.mseStreamableVerdict = 'no';
       }
@@ -1768,6 +1775,10 @@ class WatchPartyService {
     }
     const blob = new Blob(parts, { type: this.receiveMimeType });
     const file = new File([blob], this.receiveFileName, { type: this.receiveMimeType });
+    console.log(
+      '[watch-party] file-end: assembled', blob.size, 'bytes type=', this.receiveMimeType,
+      'mseVerdict=', this.mseStreamableVerdict, 'mseFailed=', this.mseFailed,
+    );
 
     if (this.mseStreamableVerdict === 'yes' && !this.mseFailed && this.mse) {
       // MSE mode: drain any remaining queued chunks, then signal EOS.
