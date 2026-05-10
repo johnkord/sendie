@@ -38,12 +38,35 @@ describe('isStreamableContainer', () => {
     expect(isStreamableContainer('video/x-matroska', new Uint8Array(64))).toBe(false);
   });
 
-  it('mp4 with moov before mdat is streamable (faststart)', () => {
+  it('moov-first mp4 without mvex is NOT streamable (regular mp4)', () => {
+    // Faststart mp4 has moov before mdat, but if moov has no mvex it's
+    // not fragmented and MSE cannot ingest it.
     const head = concat(
       box('ftyp', 24),
       box('moov', 1024),
       box('mdat', 4096),
     );
+    expect(isStreamableContainer('video/mp4', head)).toBe(false);
+  });
+
+  it('fragmented mp4 (moov contains mvex) is streamable', () => {
+    // Build moov with an mvex child. moov size = 8 header + 8 mvex header.
+    const moovWithMvex = new Uint8Array(8 + 8);
+    const moovSize = moovWithMvex.length;
+    moovWithMvex[0] = (moovSize >> 24) & 0xff;
+    moovWithMvex[1] = (moovSize >> 16) & 0xff;
+    moovWithMvex[2] = (moovSize >> 8) & 0xff;
+    moovWithMvex[3] = moovSize & 0xff;
+    moovWithMvex[4] = 'm'.charCodeAt(0);
+    moovWithMvex[5] = 'o'.charCodeAt(0);
+    moovWithMvex[6] = 'o'.charCodeAt(0);
+    moovWithMvex[7] = 'v'.charCodeAt(0);
+    moovWithMvex[8] = 0; moovWithMvex[9] = 0; moovWithMvex[10] = 0; moovWithMvex[11] = 8;
+    moovWithMvex[12] = 'm'.charCodeAt(0);
+    moovWithMvex[13] = 'v'.charCodeAt(0);
+    moovWithMvex[14] = 'e'.charCodeAt(0);
+    moovWithMvex[15] = 'x'.charCodeAt(0);
+    const head = concat(box('ftyp', 24), moovWithMvex);
     expect(isStreamableContainer('video/mp4', head)).toBe(true);
   });
 

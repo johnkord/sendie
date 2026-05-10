@@ -321,10 +321,16 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
         : err?.message || 'Video playback error.';
       setDecodeError(msg);
     };
+    // Clear stale errors when a new source loads successfully. This
+    // matters for the MSE -> Blob fallback path: the MSE attempt
+    // sets a decode error, then the Blob URL takes over and plays
+    // fine, but the error stuck around and hid the mute pill.
+    const onLoadedData = () => setDecodeError(null);
     el.addEventListener('play', onPlay);
     el.addEventListener('pause', onPause);
     el.addEventListener('volumechange', onVolumeChange);
     el.addEventListener('error', onError);
+    el.addEventListener('loadeddata', onLoadedData);
     const i = window.setInterval(updateTracks, 500);
     updateTracks();
     onVolumeChange();
@@ -333,6 +339,7 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
       el.removeEventListener('pause', onPause);
       el.removeEventListener('volumechange', onVolumeChange);
       el.removeEventListener('error', onError);
+      el.removeEventListener('loadeddata', onLoadedData);
       clearInterval(i);
     };
   }, [objectUrl]);

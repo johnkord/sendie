@@ -1795,13 +1795,32 @@ function pickMseCodec(mediaType: string): string | null {
 
 /**
  * Sniff the first received bytes to decide whether the container is
- * progressively-decodable. WebM is always yes; mp4 is yes iff `moov`
- * comes before `mdat`. Anything else: no. Used to decide whether to
- * try MSE or fall back to wait-for-full-receipt.
+ * progressively-decodable via MSE. Used to decide whether to try MSE
+ * or fall back to wait-for-full-receipt.
+ *
+ * - WebM: always yes. WebM is structured as init segment + clusters
+ *   that MSE accepts directly.
+ *
+ * - mp4: yes iff this is FRAGMENTED mp4 (fmp4 / CMAF). Detected by an
+ *   `mvex` box inside `moov`. Regular mp4 with moov-first looks
+ *   streamable but is NOT MSE-compatible: it has one giant `mdat`
+ *   that you can't feed to appendBuffer in arbitrary slices. Many
+ *   sources call this 'progressive mp4' which is a misnomer for our
+ *   purposes; only fmp4 / CMAF is actually progressive over MSE.
+ *
+ *   This is the canonical MSE gotcha. Quoting Mozilla:
+ *     "Source buffers expect data in fragmented mp4 (fmp4) form ...
+ *      a regular mp4 file will result in a QuotaExceededError or
+ *      InvalidStateError."
+ *
+ * - Anything else: no.
  */
 export function isStreamableContainer(mediaType: string, head: Uint8Array): boolean {
   if (mediaType.includes('webm')) return true;
   if (!mediaType.includes('mp4')) return false;
+  // Walk top-level boxes looking for moov, then check if it has mvex.
+  // mvex (movie-extends) declares this is fragmented; without it, the
+  // mp4 is monolithic and not MSE-streamable.
   let offset = 0;
   while (offset + 8 <= head.length) {
     const size =
@@ -1810,8 +1829,24 @@ export function isStreamableContainer(mediaType: string, head: Uint8Array): bool
     const type = String.fromCharCode(
       head[offset + 4], head[offset + 5], head[offset + 6], head[offset + 7],
     );
-    if (type === 'moov') return true;
-    if (type === 'mdat') return false;
+    if (type === 'mdat') return false; // mdat before moov: not even moov-first
+    if (type === 'moov') {
+      // Walk children of moov looking for mvex.
+      const moovEnd = offset + (size === 0 ? head.length - offset : size);
+      let inner = offset + 8;
+      while (inner + 8 <= Math.min(moovEnd, head.length)) {
+        const innerSize =
+          (head[inner] << 24) | (head[inner + 1] << 16)
+          | (head[inner + 2] << 8) | head[inner + 3];
+        const innerType = String.fromCharCode(
+          head[inner + 4], head[inner + 5], head[inner + 6], head[inner + 7],
+        );
+        if (innerType === 'mvex') return true;
+        if (innerSize < 8) return false;
+        inner += innerSize;
+      }
+      return false; // moov was found but had no mvex -> not fragmented
+    }
     if (size === 1) {
       if (offset + 16 > head.length) return false;
       const hi =
