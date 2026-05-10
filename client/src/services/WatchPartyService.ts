@@ -887,17 +887,35 @@ class WatchPartyService {
     // crisp.
     const initialSync = () => {
       const tl = this.lastTimeline;
-      if (!tl || !tl.playing) return;
+      if (!tl) return;
       const anchorMonoLocal = tl.anchorMono - this.hostClockOffset;
-      const elapsed = Math.max(0, this.localMono() - anchorMonoLocal);
+      const elapsed = tl.playing ? Math.max(0, this.localMono() - anchorMonoLocal) : 0;
       const expected = tl.anchorTime + elapsed * tl.playbackRate;
       if (Math.abs(el.currentTime - expected) > 0.5) {
         try { el.currentTime = Math.max(0, expected); } catch { /* ignore */ }
       }
+      // Critical: kick off playback if host says playing. Without this
+      // the drift loop never starts because rVFC only fires for
+      // playing videos. Try unmuted first; muted fallback satisfies
+      // browser autoplay policy when no user gesture is in scope.
+      if (tl.playing && el.paused) {
+        el.play().catch(() => {
+          if (!el.muted) {
+            el.muted = true;
+            el.play().catch(() => {
+              this.surfaceError('Click the video to start playback.');
+            });
+          }
+        });
+      }
     };
     el.addEventListener('canplay', initialSync, { once: true });
+    // Also listen for loadeddata which fires earlier on some browsers
+    // (Safari especially) and ensures we don't miss the kick.
+    el.addEventListener('loadeddata', initialSync, { once: true });
     return () => {
       el.removeEventListener('canplay', initialSync);
+      el.removeEventListener('loadeddata', initialSync);
       stop();
       this.videoEl = null;
     };
