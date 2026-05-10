@@ -139,6 +139,10 @@ export interface WatchPartyState {
   // each follower. Follower: their own receive progress (single value
   // keyed by hostPeerId in the same map). null = not transferring.
   forwardProgress: Map<string, number>;
+  // Host-side preparation (transmux) status. null = not preparing.
+  // When set, the host UI shows a progress bar and gates the actual
+  // file fan-out. Receivers see no announcement until prep is done.
+  prepStatus: { phase: 'transmux'; progress: number } | null;
   // Mode C, F-progressive: an explicit URL the UI should bind to the
   // <video> element. Set on the receiver to a MediaSource object URL
   // when progressive playback is active; null otherwise (in which
@@ -187,6 +191,7 @@ class WatchPartyService {
     streamId: null,
     forwardProgress: new Map(),
     playbackUrl: null,
+    prepStatus: null,
     lastTimelineAt: 0,
     error: null,
   };
@@ -334,8 +339,13 @@ class WatchPartyService {
         } else {
           this.sendTimeline(peerId);
         }
-        // Mode C late-joiner: start a fresh forward to this peer.
-        if (this.state.mode === 'forward' && this.forwardSourceFile) {
+        // Mode C late-joiner: start a fresh forward to this peer,
+        // but only if host prep is finished. If prep is still in
+        // flight, runHostPrep's callback will pick up this peer
+        // along with the rest of the room.
+        if (this.state.mode === 'forward'
+            && this.forwardSourceFile
+            && this.state.prepStatus === null) {
           void this.startForwardTo(peerId);
         }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
@@ -459,6 +469,7 @@ class WatchPartyService {
       streamId: null,
       forwardProgress: new Map(),
       playbackUrl: null,
+      prepStatus: null,
       lastTimelineAt: this.localMono(),
       error: null,
     };
@@ -480,10 +491,18 @@ class WatchPartyService {
       // in onDataChannelOpen.
       this.forwardSourceFile = file;
       this.startHeartbeat();
-      for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
-        if (peerId === myPeerId) continue;
-        void this.startForwardTo(peerId);
-      }
+      // Best-effort transmux pass: if the file is plain mp4 (not
+      // already fmp4 / webm), repackage to fmp4 so receivers can use
+      // the F-progressive MSE path. Failure is non-fatal; we fall
+      // through to forwarding the original bytes which still plays
+      // (just without progressive playback). See
+      // docs/transmuxing-research.md for the design.
+      void this.runHostPrep(file).then(() => {
+        for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
+          if (peerId === myPeerId) continue;
+          void this.startForwardTo(peerId);
+        }
+      });
     }
     // For stream mode: the UI must call attachStreamSourceElement() with
     // the host's <video>. captureStream and the wp-stream-start
@@ -766,6 +785,7 @@ class WatchPartyService {
       streamId: null,
       forwardProgress: new Map(),
       playbackUrl: null,
+      prepStatus: null,
       lastTimelineAt: 0,
       error: null,
     };
@@ -1386,6 +1406,46 @@ class WatchPartyService {
   }
 
   // -------- Mode C: file-forward host side --------
+
+  /**
+   * Optional preflight pass on the host: if the file is plain mp4
+   * (not already fmp4 / webm), repackage it to fmp4 in memory using
+   * mp4box.js so receivers can do progressive playback via MSE. See
+   * docs/transmuxing-research.md.
+   *
+   * Failures are non-fatal: any error logs and falls through to
+   * forwarding the original bytes (still plays, just without
+   * progressive playback).
+   */
+  private async runHostPrep(file: File): Promise<void> {
+    try {
+      const { classifyForTransmux, transmuxToFmp4, TRANSMUX_MIN_BYTES } =
+        await import('./watchPartyTransmux');
+      // Below the floor, C1 finishes before transmux would. Skip.
+      if (file.size < TRANSMUX_MIN_BYTES) return;
+      const decision = await classifyForTransmux(file);
+      if (decision !== 'transmux') return;
+      this.state = { ...this.state, prepStatus: { phase: 'transmux', progress: 0 } };
+      this.emitState();
+      const { blob, mediaType } = await transmuxToFmp4(file, (p) => {
+        this.state = {
+          ...this.state,
+          prepStatus: { phase: 'transmux', progress: p.read },
+        };
+        this.emitState();
+      });
+      // Replace forward source with the transmuxed Blob. Receivers
+      // see the new mediaType (fmp4 mime) in wp-file-start, sniff
+      // for mvex, and engage MSE.
+      this.forwardSourceFile = new File([blob], file.name, { type: mediaType });
+    } catch (err) {
+      console.warn('[watch-party] host transmux failed; forwarding original bytes:', err);
+      // Fall through with the original file.
+    } finally {
+      this.state = { ...this.state, prepStatus: null };
+      this.emitState();
+    }
+  }
 
   private async startForwardTo(peerId: string): Promise<void> {
     const file = this.forwardSourceFile;

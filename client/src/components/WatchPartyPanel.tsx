@@ -502,10 +502,35 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             muted={(isHost && state.mode === 'stream') || (!isHost && followerMuted)}
             className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
           />
+          {/* Host transmux prep overlay (Mode C): the file is being
+              repackaged to fmp4 so receivers can do progressive
+              playback. Strictly precedes the 'sending to viewers'
+              overlay; we don't fan out until prep finishes. */}
+          {isHost && state.prepStatus && !decodeError && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/85 text-white p-4">
+              <span className="text-2xl">⚙️</span>
+              <span className="text-sm font-medium">Preparing for streaming...</span>
+              <div className="w-full max-w-xs space-y-1">
+                <div className="h-1 rounded bg-slate-700 overflow-hidden">
+                  <div
+                    className="h-full bg-purple-400 transition-all"
+                    style={{ width: `${Math.round((state.prepStatus.progress) * 100)}%` }}
+                  />
+                </div>
+                <p className="text-[11px] text-slate-300 text-center tabular-nums">
+                  {Math.round(state.prepStatus.progress * 100)}%
+                </p>
+              </div>
+              <p className="text-[11px] text-slate-400 text-center">
+                Repackaging your file so viewers can start watching faster.
+                Skipped automatically for already-fragmented files.
+              </p>
+            </div>
+          )}
           {/* Forward-mode host gate: hold playback until all peers
               have received the file. Shows current per-peer progress.
               Disappears as soon as all peers hit 100%. */}
-          {isHost && state.mode === 'forward' && !allPeersReceived && !decodeError && (
+          {isHost && state.mode === 'forward' && !state.prepStatus && !allPeersReceived && !decodeError && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 text-white p-4">
               <span className="text-2xl">📡</span>
               <span className="text-sm font-medium">Sending to viewers...</span>
