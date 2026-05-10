@@ -1686,10 +1686,21 @@ class WatchPartyService {
         if (!this.mse) return;
         try {
           const sb = this.mse.addSourceBuffer(codec);
-          sb.mode = 'sequence';
+          // Default 'segments' mode honors DTS/PTS in the fmp4 tfdt
+          // boxes. We previously set 'sequence' (which tells the
+          // browser to ignore segment timestamps and concatenate)
+          // and that conflicted with fragmented mp4 from mp4box.js.
+          // Leave at default.
           sb.addEventListener('updateend', () => this.flushMseQueue());
-          sb.addEventListener('error', () => {
-            console.warn('[watch-party] SourceBuffer error; falling back to Blob');
+          sb.addEventListener('error', (ev) => {
+            // SourceBuffer 'error' has no detail; correlate with the
+            // video element's MediaError to give the user a clue.
+            const ve = this.videoEl?.error;
+            console.warn(
+              '[watch-party] SourceBuffer error; falling back to Blob.',
+              'video.error:', ve ? `code=${ve.code} msg=${ve.message}` : 'none',
+              'event:', ev,
+            );
             this.markMseFailed();
           });
           this.mseSourceBuffer = sb;
@@ -1717,7 +1728,12 @@ class WatchPartyService {
     try {
       sb.appendBuffer(next);
     } catch (err) {
-      console.warn('[watch-party] appendBuffer failed; falling back to Blob:', err);
+      const head4 = Array.from(next.subarray(0, Math.min(16, next.length)))
+        .map((b) => b.toString(16).padStart(2, '0')).join(' ');
+      console.warn(
+        '[watch-party] appendBuffer failed; falling back to Blob:', err,
+        'chunkBytes=', next.length, 'firstBytes=', head4,
+      );
       this.markMseFailed();
     }
   }
@@ -1816,11 +1832,20 @@ class WatchPartyService {
       this.tearDownMse();
       if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
       this.receivedBlobUrl = URL.createObjectURL(blob);
+      console.log(
+        '[watch-party] file-end fallback: blobUrl=', this.receivedBlobUrl,
+        'baseType=', baseType, 'localFileSet=true',
+      );
       this.state = {
         ...this.state,
         localFile: file,
         mode: 'local',
-        playbackUrl: null, // UI will fall back to URL.createObjectURL(localFile)
+        // Bind playbackUrl directly to the Blob URL we just minted.
+        // Previously we left this null and relied on the UI's
+        // useEffect to call URL.createObjectURL(localFile), but that
+        // indirection had subtle timing issues if React batched the
+        // state update. Source-of-truth is the service.
+        playbackUrl: this.receivedBlobUrl,
       };
     }
     this.receiveBuffers.clear();

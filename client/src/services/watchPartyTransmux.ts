@@ -240,9 +240,12 @@ export async function transmuxToFmp4(
         mp4boxfile.setSegmentOptions(track.id, null, { nbSamples: 60 });
       }
       const initSegs = mp4boxfile.initializeSegmentation();
-      for (const seg of initSegs) {
-        const buf = new Uint8Array(seg.buffer);
-        parts.push(buf);
+      // mp4box.js returns one init segment per track but each contains
+      // the full multi-track moov. Concatenating all of them produces
+      // duplicate ftyp+moov boxes which MSE rejects. We only need the
+      // first; it has everything.
+      if (initSegs.length > 0) {
+        parts.push(new Uint8Array(initSegs[0].buffer));
       }
       mp4boxfile.onSegment = (_id, _user, buffer, _sampleNumber, _last) => {
         if (aborted) return;
