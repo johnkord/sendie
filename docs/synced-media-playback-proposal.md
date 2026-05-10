@@ -1,8 +1,16 @@
 # Synced media playback ("watch party") for Sendie
 
-Status: proposal, not yet implemented. Targets Sendie's existing P2P
-mesh (2 to 8 peers, no SFU, no server-side state). Last updated
-2026-05.
+Status: **shipped (forward + local modes)**. Last updated 2026-05-10.
+
+> **Reading order.** This document accumulated as we built. To
+> understand what's actually live today, jump straight to section
+> 5.5 ("Already shipped" + "Deferred / abandoned"). Sections 1
+> through 5 are the original design doc; sections 2.5-2.8 are
+> autopsies of design pivots and bugs we hit along the way. Useful
+> as a record of what we tried and why we made the calls we did,
+> not as a description of current behavior. Where the original
+> design contradicts what we eventually shipped, the
+> "Already shipped" section in 5.5 wins.
 
 ## 1. The problem, sized correctly
 
@@ -524,24 +532,28 @@ drift    = actual - expected
 monotonic clock to the host's. Three regimes for what to do with
 `drift`:
 
-- **|drift| < 100 ms**: do nothing. Within human perception slack
-  for non-musical content; correcting more aggressively causes
-  visible playback rate wobble.
-- **100 ms <= |drift| < 1 s**: nudge `playbackRate` up or down by
-  ~5% for a couple of seconds. The browser resamples audio
-  transparently (on every browser since 2018). This is what every
-  serious watch-party player does (Plex, Jellyfin, Kodi, Syncplay).
-- **|drift| >= 1 s**: hard `currentTime = expected` seek. Visible
-  jump but unavoidable. Also runs on initial join, after pause /
-  resume, and after seek commands from the host.
+- **|drift| < 500 ms**: do nothing (the deadband). Within human
+  perception slack for casual viewing; correcting more
+  aggressively causes audible micro-pitch shifts each time
+  `playbackRate` is written.
+- **500 ms <= |drift| < 1.5 s**: nudge `playbackRate` toward
+  host_rate by up to 5%, scaled linearly with drift magnitude.
+  Throttled to at most one rate change per second so the audio
+  pipeline gets to settle between nudges.
+- **|drift| >= 1.5 s**: hard `currentTime = expected` seek.
+  Visible jump but unavoidable. Also runs on initial join, after
+  pause / resume, and after seek commands from the host. Pinned
+  with an 800 ms cooldown so rapid-fire seeks don't thrash the
+  decoder.
 
 **Tension:** rate-nudging vs hard seek. Aggressive rate nudges keep
-audio continuous but require careful hysteresis (don't oscillate);
-aggressive hard seeks are more "correct" but jolt the user. Plex's
-defaults (used in their Watch Together feature) are 50ms / 1s, very
-similar. Defaulting to 100 ms / 1 s thresholds gives Sendie's
-voice-overlay use case a little more slack so quick comments don't
-trigger a re-sync.
+audio continuous but produce micro-pitch jitter every time
+`playbackRate` changes. Aggressive hard seeks are more "correct"
+but jolt the user and trigger buffering. The 500 ms deadband + 1 s
+throttle is what we landed on after dogfooding — earlier
+thresholds (100 ms / 1 s, what Plex uses) caused audible
+oscillation against natural network jitter on a typical home
+connection.
 
 ## 4. Protocol shape (what messages flow when)
 
@@ -765,189 +777,124 @@ Each item lists value (how broadly users want it), effort (build
 cost including cross-browser testing), and risk (likelihood of
 getting stuck or causing regressions). Five-point scale.
 
-### Already shipped (recap)
+### Already shipped
 
-These were the v2 / v2.x line items and are working today:
+These work in production today:
 
-- Mode A (BYO local file) and Mode C (forward bytes) with the
-  picker.
+- **Mode A (BYO local file)** and **Mode C (forward bytes)** with
+  the picker. Stream mode (captureStream re-encode) was tried and
+  removed.
 - Timeline sync: play, pause, seek (start and end of scrub), rate
-  change, mute toggle.
-- Drift correction: 1 s heartbeat, 0.5 s hard-seek threshold, rate
-  nudge proportional to drift up to 5%, post-seek cooldown,
-  buffering-aware skip.
+  change, mute toggle. Host-initiated changes apply directly on
+  receive instead of waiting for the drift loop's next tick.
+- Drift correction: 1 s heartbeat, 1.5 s hard-seek threshold,
+  rate nudge proportional to drift up to 5%, post-seek cooldown,
+  buffering-aware skip, 500 ms deadband, throttled to one rate
+  change per second to keep the audio pipeline smooth.
 - One-shot initial sync seek when the receiver's video first has
   data.
 - Host autoplay gated on all peers reaching 100% transfer.
-- Click-to-start overlay for autoplay-blocked receivers.
-- CSP / codec preflight banners for the gotchas we have hit
-  during dogfooding.
+- Host overlay shows per-peer transfer progress while sending.
+- Click-to-start overlay for autoplay-blocked receivers, with a
+  muted-fallback fallback. Always-visible mute pill for follower
+  audio control.
+- Codec preflight banner warns Firefox-on-Linux about H.264.
+- **F-skip** (host -10s / +10s buttons that propagate via
+  `hostSeek` lookahead).
+- **F-resume** (localStorage-backed, SHA-256 of name+size,
+  30 day TTL, "Resume at MM:SS?" prompt).
+- **F-late** (toast on host when a follower's transfer completes
+  past 5 s of host playback; one-click "Rewind to start").
+- **F-pip** (standard single-element Picture-in-Picture toggle;
+  label flips to "Exit PiP" while active).
+- **F-dots** (colored per-peer playhead dots on the host's
+  seekbar with friendly-name tooltips).
 
-### Tier 1: build next (in this order)
+### Deferred / abandoned
 
-#### F-skip. Host skip-back / skip-forward buttons (10 s)  -  **value 4, effort 1, risk 1**
-Two buttons flanking the seekbar in the host's panel: -10s / +10s.
-Routes through `watchPartyService.hostSeek(currentTime ± 10)` so
-the timeline broadcast (with seek lookahead) propagates to
-followers. Same pattern Netflix / YouTube use. Host is a one-line
-addition; the wire format already supports it.
+- **F-progressive** (start playback before the full file arrives).
+  Two implementations attempted in May 2026, both reverted. The
+  full autopsy lives in
+  [docs/transmuxing-research.md](transmuxing-research.md). TL;DR:
+  the mp4box.js + MSE path failed on opaque `SourceBuffer.error`
+  events we never root-caused; the Service Worker byte-range
+  proxy hit a different scope/lifecycle bug we ran out of
+  patience for. Both attempts left the receiver in a worse state
+  than the wait-then-play default. Future work should start with
+  a minimal-repro HTML page outside Sendie before re-integrating.
 
-Stretch: also bind keyboard shortcuts (`J` / `L` per the
-universal video-editor convention; arrow keys are already taken
-by the native `<video controls>`). Active only when the watch-
-party panel has focus.
+### Tier 1: small wins still worth doing
 
-#### F-resume. Persistent playback-position resume  -  **value 4, effort 2, risk 1**
-On graceful leave, write `{ mediaName, mediaSize, anchorTime,
-sessionEndedAt }` to localStorage keyed by the SHA-256 of
-`(mediaName + mediaSize)`. When the host picks the same file
-again, prompt: "Resume at 47:18?" Per-host because we have no
-cross-device identity. Cleans up records older than 30 days on
-read so localStorage doesn't grow unbounded.
+These are short, low-risk, and would polish the rough edges.
 
-The hash key (rather than just the filename) avoids confusing
-two unrelated movies with the same filename.
-
-#### F-chat. Watch-party chat thread binding  -  **value 4, effort 1, risk 1**
-Sendie already has chat. The visual change is small: when a
-watch-party session is active, render the chat panel adjacent to
-the video, and tag each message with the host's `currentTime` at
-the moment of send (e.g. "[14:32] that scene was great"). Lets
-people scroll back through chat after the movie and recall what
-moment each comment was about.
-
-Implementation: just thread `mediaTime` through the chat send
-path when a watch party is live. No new wire messages.
-
-#### F-late. Late-joiner "rewind for everyone" prompt  -  **value 3, effort 1, risk 1**
-When a peer joins mid-playback in Mode C, host sees a non-modal
-toast: "ruby-silent-valley joined. Rewind to start? [Yes / No]"
-With "Yes", host seeks to 0 and the existing timeline propagation
-handles the rest. With "No", existing behavior stays.
-
-Default behavior unchanged. Adds zero protocol complexity. Fixes
-the "Netflix Party leaves the late joiner alone at t=0" bug that
-nobody loves.
-
-### Tier 2: meaningful upgrade, real project
-
-#### F-progressive. Variant C2: progressive playback via MSE  -  **value 5, effort 5, risk 4**
-Today the receiver waits for the full transfer before playback
-starts (variant C1). For a 2 GB movie on a typical home uplink
-that is 5+ minutes of "loading" instead of "watching." Variant
-C2 starts playback within a few seconds.
-
-Mechanism: receiver creates a `MediaSource`, attaches its URL to
-`<video>`, opens a `SourceBuffer` for the announced codec, and
-calls `appendBuffer(chunk)` as bytes arrive. Playback starts as
-soon as the first GOP is decodable.
-
-Hard parts:
-
-1. **The mp4 has to be FRAGMENTED (fmp4 / CMAF), not just
-   moov-first.** This is the canonical MSE pitfall and we hit it
-   in v2 dogfooding. Regular mp4 (what every phone, OBS, ffmpeg
-   default, Premiere export produces) has one giant `mdat` and
-   `appendBuffer` rejects arbitrary slices. Three paths:
-
-   a) Pre-flight transmux on the host: dynamic-import mp4box.js
-      (~340 KB gzipped, WASM) and rewrite plain mp4 to fmp4 in
-      memory before sending. No re-encode, just a container
-      remux. ~5 to 30 seconds host CPU per first-time file;
-      memory-bound at ~1.5 GB input ceiling. Recommended.
-
-   b) Require fmp4 input. Reject regular mp4 with a clear
-      message; user runs `ffmpeg -movflags +faststart+frag_keyframe`
-      themselves. Free for us, painful for the user. Currently
-      shipping (the receiver falls back to C1 wait-for-receipt).
-
-   c) Byte-range peering: receiver's `<video>` requests ranges,
-      a Service Worker translates those into data-channel requests
-      to the host. Works for any container the browser plays
-      directly. v3 candidate.
-
-   See [docs/transmuxing-research.md](transmuxing-research.md) for
-   the full analysis (mp4box.js vs mux.js vs FFmpeg.wasm vs custom
-   muxer vs server-side, with bundle / memory / speed costs).
-
-2. **Codec mime detection.** Need the exact codec string for
-   `MediaSource.addSourceBuffer(...)`. mp4box.js can extract
-   this; without it, we probe with a few known strings
-   (`avc1.64001E`, `avc1.42E01E` for H.264; `vp09.00.10.08` for
-   VP9; etc) and pick the first one `MediaSource.isTypeSupported`
-   accepts. Imperfect but works for 95% of files.
-
-3. **WebM is easier than mp4.** WebM is always streamable
-   (cluster-by-cluster) so the variant C2 happy path could ship
-   for WebM first.
-
-This is the single biggest perceived-quality jump available.
-Worth doing, but it is a real project, not a one-day task.
-
-#### F-pip. Document Picture-in-Picture detach  -  **value 3, effort 2, risk 2**
-The Document PiP API (Chrome 116+, Edge 116+) lets us pop the
-whole watch-party UI into an always-on-top window so users can
-keep working while the movie plays in the corner. Render a
-"pop out" button that's only visible when
-`window.documentPictureInPicture` exists. React keeps rendering
-the same component tree inside the PiP window; sync events
-flow through unchanged.
-
-Falls back gracefully: where Document PiP is unavailable, we
-expose the standard `<video>` PiP (single-element) which works
-in Chrome / Edge / Safari / Firefox.
+#### F-save. "Save the file" button on receivers  -  **value 3, effort 1, risk 1**
+After forward mode completes, receivers have the file in memory
+as a Blob. Add a one-click "Save to disk" button that triggers
+the existing `streamSaver` path. Useful when the movie was good
+and the receiver wants their own copy.
 
 #### F-bg. Background-tab keepalive  -  **value 3, effort 2, risk 2**
-Browsers throttle setInterval to 1 Hz when a tab is hidden,
-which slows the timeline heartbeat from 1 s to 1 s minimum but
-in practice can stretch to 30+ s under aggressive throttling.
-Receivers desync silently when the host backgrounds.
+Browsers throttle `setInterval` to 1 Hz when a tab is hidden,
+which slows the timeline heartbeat. Receivers can desync silently
+while the host backgrounds the tab. Three knobs:
 
-Three knobs:
-
-1. `navigator.wakeLock.request('screen')` while the watch party
-   is active. Keeps the screen on; doesn't directly fight
-   throttling but prevents the device from sleeping mid-movie.
-
-2. Move the heartbeat to a dedicated Web Worker with its own
-   timer. Workers are also throttled, but less aggressively
-   than main-thread timers, and `MessageChannel`-driven sends
-   survive better than raw setInterval.
-
-3. Use the `Page Visibility API` to detect backgrounding and
-   show a "tab will throttle in background; consider PiP" hint
-   before users get burned.
+1. `navigator.wakeLock.request('screen')` while a watch party is
+   active. Keeps the screen on; doesn't directly fight throttling
+   but prevents device sleep mid-movie.
+2. Move the heartbeat to a dedicated Web Worker. Workers are also
+   throttled but less aggressively than main-thread timers.
+3. `Page Visibility API` to detect backgrounding and show a "tab
+   will throttle; consider PiP" hint before users get burned.
 
 Knob 1 is one line; knobs 2 and 3 together are a small project.
 
-#### F-dots. Per-peer playhead dots on the host's seekbar  -  **value 3, effort 2, risk 1**
-We already broadcast `wp-peer-state` with each follower's
-`mediaTime` every ~1 s. Render those as colored dots on the
-host's seekbar so drift is visible at a glance. Hovering shows
-the peer's friendly name. Useful for spotting "Sarah's still
-buffering" before the host hits play on the next chapter.
+### Tier 2: real projects
 
-Re-uses existing data; new code is purely UI.
+#### F-progressive. Start playback before the file finishes arriving  -  **value 5, effort 5, risk 5**
+Today the receiver waits for the full transfer. For a 2 GB movie
+on a typical home uplink that is 5+ minutes of "loading" instead
+of "watching." Progressive playback would close that to a few
+seconds.
 
-### Tier 3: niche but easy enough to keep on the list
+Two viable architectures, neither of which we got working in
+May 2026:
+
+1. **MSE + transmux on host.** Host repackages plain mp4 to
+   fragmented mp4 (fmp4) with mp4box.js, sends the fmp4 bytes,
+   receiver feeds them to a `MediaSource` via `appendBuffer`.
+   Failure mode: opaque `SourceBuffer.error` mid-decode that we
+   never root-caused. Architecturally fmp4 is the only progressive
+   path that doesn't require a Service Worker, but the fallback
+   is broken (fmp4 isn't playable as a direct Blob URL).
+
+2. **Service Worker byte-range proxy.** Receiver registers a
+   Service Worker that backs a synthetic `/wp-stream/<id>` URL.
+   `<video>` issues range fetches; the SW proxies them as
+   data-channel round-trips to the host. Browser's own demuxer
+   parses the file. Works for any container the browser plays
+   directly. Hit a clients/lifecycle bug we ran out of patience
+   for.
+
+See
+[docs/transmuxing-research.md](transmuxing-research.md) for the
+multi-page autopsy of both attempts. Recommended next step before
+trying again: minimal-repro HTML page using
+`chrome://media-internals/` and `chrome://serviceworker-internals/`
+to get the actual error info that JavaScript can't see.
+
+### Tier 3: niche, take-or-leave
 
 #### F-clip. Watch-party clip export  -  **value 2, effort 3, risk 2**
-Anyone marks `[start, end]` during playback (default: 30 s
-back, 10 s forward, fine-tunable). On session end, the marker
-owner can export the original file trimmed to that range using
-the same Mode C / file-transfer path with a server-side ffmpeg
-(no, we don't have a server)... or via `MediaRecorder` against
-a `<video>`-driven canvas. The latter is jankier but stays
-zero-server. Useful for "send the funny moment to the group
-chat after." Skip if no demand.
+Anyone marks `[start, end]` during playback. After the session,
+export the original file trimmed to that range. Stays zero-server
+via either trimming the source mp4 with a pure-JS slice (no
+re-encode; works on the original keyframes) or `MediaRecorder`
+against a `<video>`-driven canvas (jankier but works for any
+range). Skip until anyone asks for it.
 
-#### F-save. "Save the file" button on receivers  -  **value 2, effort 1, risk 1**
-After Mode C completes, receivers have the file in memory as a
-Blob. Add a one-click "Save to disk" button that triggers the
-existing `streamSaver` path. Particularly nice when the movie
-turned out to be good and the receiver wants their own copy.
-
-Tiny addition, almost no risk.
+#### F-chat. Watch-party chat thread binding  -  **value 3, effort 1, risk 1**
+*Considered and rejected by user (2026-05): they're fine with chat
+in its current location.* Kept here for the historical record.
 
 ### What we considered and ARE NOT building
 
