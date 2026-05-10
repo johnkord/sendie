@@ -559,6 +559,11 @@ function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSee
     };
   }, [videoRef]);
 
+  const skip = (delta: number) => {
+    const target = Math.max(0, Math.min(duration || time + delta, time + delta));
+    watchPartyService.hostSeek(target);
+  };
+
   return (
     <div className="flex items-center gap-2 flex-wrap">
       {paused ? (
@@ -578,6 +583,20 @@ function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSee
           ⏸ Pause
         </button>
       )}
+      <button
+        onClick={() => skip(-10)}
+        className="px-2 py-1 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+        title="Back 10 seconds (synced for everyone)"
+      >
+        ⏪ 10s
+      </button>
+      <button
+        onClick={() => skip(10)}
+        className="px-2 py-1 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+        title="Forward 10 seconds (synced for everyone)"
+      >
+        10s ⏩
+      </button>
       <input
         type="range"
         min={0}
