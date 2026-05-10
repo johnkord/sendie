@@ -1,6 +1,11 @@
 import { multiPeerWebRTCService } from './MultiPeerWebRTCService';
 import { signalingService } from './SignalingService';
 import { cryptoService } from './CryptoService';
+import {
+  classifyTimelineChange,
+  expectedMediaTime,
+  type TimelinePoint,
+} from './watchPartySync';
 import type { DataChannelMessage } from '../types';
 
 /**
@@ -134,6 +139,13 @@ export interface WatchPartyState {
   // each follower. Follower: their own receive progress (single value
   // keyed by hostPeerId in the same map). null = not transferring.
   forwardProgress: Map<string, number>;
+  // Mode C, F-progressive: an explicit URL the UI should bind to the
+  // <video> element. Set on the receiver to a MediaSource object URL
+  // when progressive playback is active; null otherwise (in which
+  // case the UI falls back to URL.createObjectURL(localFile)).
+  // We thread this through state rather than File so the UI doesn't
+  // need to know about MediaSource at all.
+  playbackUrl: string | null;
   // Last-seen heartbeat info (followers only).
   lastTimelineAt: number;
   // Most recent error message surfaced for the UI; cleared on next
@@ -174,6 +186,7 @@ class WatchPartyService {
     localFile: null,
     streamId: null,
     forwardProgress: new Map(),
+    playbackUrl: null,
     lastTimelineAt: 0,
     error: null,
   };
@@ -264,6 +277,29 @@ class WatchPartyService {
   private receivedBlobUrl: string | null = null;
   // Follower: progress reported back to host every PROGRESS_ACK_EVERY chunks.
   private static readonly PROGRESS_ACK_EVERY = 32;
+
+  // -------- F-progressive (MSE) state --------
+
+  // MediaSource for progressive playback. null if MSE was not attempted
+  // or fell back to Blob assembly.
+  private mse: MediaSource | null = null;
+  private mseUrl: string | null = null;
+  private mseSourceBuffer: SourceBuffer | null = null;
+  // FIFO of chunks waiting to be appendBuffer-ed. SourceBuffer can only
+  // accept one append at a time (rejects while updating); we drain the
+  // queue from the 'updateend' event.
+  private mseQueue: Uint8Array[] = [];
+  // Set true once we've decided MSE won't work for this file (e.g.
+  // appendBuffer threw, or container is unstreamable). Receiver then
+  // falls back to the Blob-assembly path on file-end.
+  private mseFailed = false;
+  // Set true once we've signaled endOfStream so we don't double-call.
+  private mseEnded = false;
+  // Once we have enough leading bytes to decide whether the container
+  // is streamable, this is set to a verdict. Streamable = MSE; else
+  // tear down MSE and use Blob assembly.
+  // 'pending' until we've sniffed the first ~64 KB.
+  private mseStreamableVerdict: 'pending' | 'yes' | 'no' = 'pending';
 
   constructor() {
     multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
@@ -422,6 +458,7 @@ class WatchPartyService {
       localFile: file,
       streamId: null,
       forwardProgress: new Map(),
+      playbackUrl: null,
       lastTimelineAt: this.localMono(),
       error: null,
     };
@@ -711,6 +748,10 @@ class WatchPartyService {
       URL.revokeObjectURL(this.receivedBlobUrl);
       this.receivedBlobUrl = null;
     }
+    this.tearDownMse();
+    this.mseFailed = false;
+    this.mseEnded = false;
+    this.mseStreamableVerdict = 'pending';
     this.stopHeartbeat();
     this.stopStaleWatchdog();
     if (this.driftLoopCancel) { this.driftLoopCancel(); this.driftLoopCancel = null; }
@@ -724,6 +765,7 @@ class WatchPartyService {
       localFile: null,
       streamId: null,
       forwardProgress: new Map(),
+      playbackUrl: null,
       lastTimelineAt: 0,
       error: null,
     };
@@ -1054,34 +1096,15 @@ class WatchPartyService {
     // the previous timeline plus elapsed wall-clock. Heartbeats advance
     // anchorTime by the heartbeat interval (~1 s), which is NOT a seek;
     // a seek is when anchorTime jumps to a value the previous timeline
-    // would not predict. Threshold is generous (1.0 s) so jitter in
-    // the host's anchor sampling doesn't get classified as a seek.
-    const seekJump = !prev || (() => {
-      if (!prev.playing) {
-        // Host was paused. Any anchorTime change is a deliberate seek.
-        return Math.abs(prev.anchorTime - msg.anchorTime) > 0.25;
-      }
-      const prevAnchorMonoLocal = prev.anchorMono - this.hostClockOffset;
-      const msgAnchorMonoLocal = msg.anchorMono - this.hostClockOffset;
-      const dt = msgAnchorMonoLocal - prevAnchorMonoLocal;
-      const expectedAnchorTime = prev.anchorTime + dt * prev.playbackRate;
-      return Math.abs(expectedAnchorTime - msg.anchorTime) > 1.0;
-    })();
-    const playFlip = !prev || prev.playing !== msg.playing;
-    const rateChange = !prev || prev.playbackRate !== msg.playbackRate;
-    const hostChanged = seekJump || playFlip || rateChange;
+    // would not predict. See watchPartySync.classifyTimelineChange and
+    // its unit tests for the exact rules.
+    const change = classifyTimelineChange(prev as TimelinePoint | null, msg);
+    const { seekJump, playFlip, rateChange, hostChanged } = change;
     this.lastTimeline = msg;
     if (hostChanged) this.driftSeekCooldownClearedAt = this.localMono();
     if (hostChanged && this.videoEl) {
       const el = this.videoEl;
-      // Compute the host's expected position right now (taking the
-      // lookahead window into account: anchorMono is in the future
-      // from the host's clock, so localNow may be before
-      // anchorMonoLocal -> elapsed clamps to 0 -> we land on
-      // anchorTime exactly, which is what the lookahead is for).
-      const anchorMonoLocal = msg.anchorMono - this.hostClockOffset;
-      const elapsed = msg.playing ? Math.max(0, this.localMono() - anchorMonoLocal) : 0;
-      const expected = msg.anchorTime + elapsed * msg.playbackRate;
+      const expected = expectedMediaTime(msg, this.hostClockOffset, this.localMono());
       if (seekJump) {
         try { el.currentTime = Math.max(0, expected); } catch { /* ignore */ }
       }
@@ -1465,6 +1488,13 @@ class WatchPartyService {
     this.receiveMimeType = msg.mediaType || 'video/mp4';
     this.receiveFileName = msg.mediaName;
     this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, 0);
+    // Reset any prior MSE state. We'll attempt setup once we've sniffed
+    // the first ~64 KB of bytes (in handleFileChunkMeta).
+    this.tearDownMse();
+    this.mseFailed = false;
+    this.mseEnded = false;
+    this.mseStreamableVerdict = 'pending';
+    this.mseQueue = [];
     this.emitState();
     this.startStaleWatchdog();
   }
@@ -1485,9 +1515,32 @@ class WatchPartyService {
     const received = this.receiveBuffers.size;
     const total = this.receiveTotalChunks || 1;
     this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, received / total);
+
+    // F-progressive: feed MSE as bytes arrive. We only feed in
+    // chunk-index order (any out-of-order arrivals get queued; we
+    // drain the queue when the SourceBuffer is no longer 'updating').
+    // Decide on streamability the first time we have enough leading
+    // bytes (~64 KB) to inspect the container header.
+    if (this.mseStreamableVerdict === 'pending' && this.haveLeadingBytes(64 * 1024)) {
+      const head = this.assembleLeadingBytes(64 * 1024);
+      if (isStreamableContainer(this.receiveMimeType, head)) {
+        const codec = pickMseCodec(this.receiveMimeType);
+        if (codec && typeof MediaSource !== 'undefined') {
+          this.mseStreamableVerdict = 'yes';
+          this.setupMse(codec);
+        } else {
+          this.mseStreamableVerdict = 'no';
+        }
+      } else {
+        this.mseStreamableVerdict = 'no';
+      }
+    }
+    if (this.mseStreamableVerdict === 'yes' && !this.mseFailed) {
+      this.queueChunkForMse(msg.chunkIndex);
+    }
+
     if (received % WatchPartyService.PROGRESS_ACK_EVERY === 0 || received === total) {
       this.emitState();
-      // ACK back to host so they can throttle.
       const ack: DataChannelMessage = {
         type: 'wp-file-ack',
         sessionId: this.state.sessionId!,
@@ -1495,6 +1548,112 @@ class WatchPartyService {
       };
       multiPeerWebRTCService.sendTo(peerId, JSON.stringify(ack));
     }
+  }
+
+  /** True if we have a contiguous run from chunk 0 covering at least n bytes. */
+  private haveLeadingBytes(n: number): boolean {
+    let total = 0;
+    for (let i = 0; ; i++) {
+      const c = this.receiveBuffers.get(i);
+      if (!c) return false;
+      total += c.length;
+      if (total >= n) return true;
+    }
+  }
+
+  /** Concatenate the first chunks until we have >= n bytes (or run out). */
+  private assembleLeadingBytes(n: number): Uint8Array {
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (let i = 0; total < n; i++) {
+      const c = this.receiveBuffers.get(i);
+      if (!c) break;
+      parts.push(c);
+      total += c.length;
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const p of parts) {
+      out.set(p, offset);
+      offset += p.length;
+    }
+    return out;
+  }
+
+  // Index up to which we've already passed chunks to MSE (exclusive).
+  // chunks[0..mseAppendedThrough) have been queued or appended.
+  private mseAppendedThrough = 0;
+
+  /**
+   * Find any newly-contiguous chunks past mseAppendedThrough and queue
+   * them for SourceBuffer.appendBuffer. Drain the queue as the
+   * SourceBuffer becomes idle.
+   */
+  private queueChunkForMse(_arrivedIndex: number): void {
+    while (true) {
+      const next = this.receiveBuffers.get(this.mseAppendedThrough);
+      if (!next) break;
+      this.mseQueue.push(next);
+      this.mseAppendedThrough++;
+    }
+    this.flushMseQueue();
+  }
+
+  private setupMse(codec: string): void {
+    try {
+      this.mse = new MediaSource();
+      this.mseUrl = URL.createObjectURL(this.mse);
+      this.mseAppendedThrough = 0;
+      this.mse.addEventListener('sourceopen', () => {
+        if (!this.mse) return;
+        try {
+          const sb = this.mse.addSourceBuffer(codec);
+          sb.mode = 'sequence';
+          sb.addEventListener('updateend', () => this.flushMseQueue());
+          sb.addEventListener('error', () => {
+            console.warn('[watch-party] SourceBuffer error; falling back to Blob');
+            this.mseFailed = true;
+          });
+          this.mseSourceBuffer = sb;
+          this.flushMseQueue();
+        } catch (err) {
+          console.warn('[watch-party] addSourceBuffer threw; falling back:', err);
+          this.mseFailed = true;
+        }
+      }, { once: true });
+      // Expose the MSE URL so the UI binds <video src=this>.
+      this.state = { ...this.state, playbackUrl: this.mseUrl };
+      this.emitState();
+    } catch (err) {
+      console.warn('[watch-party] MSE setup failed; using Blob fallback:', err);
+      this.mseFailed = true;
+      this.tearDownMse();
+    }
+  }
+
+  private flushMseQueue(): void {
+    const sb = this.mseSourceBuffer;
+    if (!sb || this.mseFailed) return;
+    if (sb.updating) return;
+    const next = this.mseQueue.shift();
+    if (!next) return;
+    try {
+      sb.appendBuffer(next);
+    } catch (err) {
+      console.warn('[watch-party] appendBuffer failed; falling back to Blob:', err);
+      this.mseFailed = true;
+    }
+  }
+
+  private tearDownMse(): void {
+    if (this.mseUrl) {
+      try { URL.revokeObjectURL(this.mseUrl); } catch { /* ignore */ }
+      this.mseUrl = null;
+    }
+    this.mse = null;
+    this.mseSourceBuffer = null;
+    this.mseQueue = [];
+    this.mseAppendedThrough = 0;
   }
 
   private handleFileEnd(
@@ -1505,6 +1664,9 @@ class WatchPartyService {
     if (this.state.role !== 'follower' || this.state.mode !== 'forward') return;
     if (msg.sessionId !== this.state.sessionId) return;
     // Assemble all chunks into a single Blob in chunk-index order.
+    // We always do this, even if MSE is active, because:
+    //  (a) the user might want to save the file to disk later,
+    //  (b) if MSE failed mid-stream we need to fall back here.
     const total = this.receiveTotalChunks;
     const parts: BlobPart[] = [];
     for (let i = 0; i < total; i++) {
@@ -1516,17 +1678,45 @@ class WatchPartyService {
       parts.push(part);
     }
     const blob = new Blob(parts, { type: this.receiveMimeType });
-    if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
-    this.receivedBlobUrl = URL.createObjectURL(blob);
-    // Synthesize a File so the existing local-mode UI can pick it up.
     const file = new File([blob], this.receiveFileName, { type: this.receiveMimeType });
-    this.state = {
-      ...this.state,
-      localFile: file,
-      // Once received, switch internally to 'local' mode for sync; the
-      // timeline algorithm works the same.
-      mode: 'local',
-    };
+
+    if (this.mseStreamableVerdict === 'yes' && !this.mseFailed && this.mse) {
+      // MSE mode: drain any remaining queued chunks, then signal EOS.
+      // Don't blob-URL the file; the playbackUrl (MSE URL) is what the
+      // <video> is bound to. Still attach the file to state so the
+      // 'save' affordance has something to work with.
+      this.flushMseQueue();
+      const tryEnd = () => {
+        if (this.mseEnded || !this.mse) return;
+        if (this.mseSourceBuffer?.updating || this.mseQueue.length > 0) {
+          // Still draining; come back when the next updateend fires.
+          if (this.mseSourceBuffer) {
+            this.mseSourceBuffer.addEventListener('updateend', tryEnd, { once: true });
+          }
+          return;
+        }
+        try {
+          this.mse.endOfStream();
+          this.mseEnded = true;
+        } catch (err) {
+          console.warn('[watch-party] endOfStream failed:', err);
+        }
+      };
+      tryEnd();
+      this.state = { ...this.state, localFile: file, mode: 'local' };
+    } else {
+      // Fallback: bind a Blob URL to playbackUrl so the player picks it
+      // up. Tear down any half-built MSE state first.
+      this.tearDownMse();
+      if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
+      this.receivedBlobUrl = URL.createObjectURL(blob);
+      this.state = {
+        ...this.state,
+        localFile: file,
+        mode: 'local',
+        playbackUrl: null, // UI will fall back to URL.createObjectURL(localFile)
+      };
+    }
     this.receiveBuffers.clear();
     this.emitState();
     this.broadcastPeerState();
@@ -1548,7 +1738,6 @@ class WatchPartyService {
 // -------- Helpers --------
 
 function bytesToBase64(bytes: Uint8Array): string {
-  // Chunk the conversion so we don't blow the call-stack on big
   // arrays (String.fromCharCode.apply has an arg-count cap).
   let binary = '';
   const CHUNK = 0x8000;
@@ -1563,6 +1752,75 @@ function base64ToBytes(b64: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+// -------- F-progressive (MSE) helpers --------
+
+const MSE_CODEC_CANDIDATES_MP4 = [
+  'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+  'video/mp4; codecs="avc1.64001f,mp4a.40.2"',
+  'video/mp4; codecs="avc1.4d401e,mp4a.40.2"',
+  'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+  'video/mp4; codecs="avc1.640028"',
+  'video/mp4; codecs="avc1.42E01E"',
+];
+const MSE_CODEC_CANDIDATES_WEBM = [
+  'video/webm; codecs="vp9,opus"',
+  'video/webm; codecs="vp8,vorbis"',
+  'video/webm; codecs="vp9"',
+  'video/webm; codecs="vp8"',
+];
+
+function pickMseCodec(mediaType: string): string | null {
+  if (typeof MediaSource === 'undefined') return null;
+  const candidates = mediaType.includes('webm')
+    ? MSE_CODEC_CANDIDATES_WEBM
+    : MSE_CODEC_CANDIDATES_MP4;
+  for (const c of candidates) {
+    if (MediaSource.isTypeSupported(c)) return c;
+  }
+  return null;
+}
+
+/**
+ * Sniff the first received bytes to decide whether the container is
+ * progressively-decodable. WebM is always yes; mp4 is yes iff `moov`
+ * comes before `mdat`. Anything else: no. Used to decide whether to
+ * try MSE or fall back to wait-for-full-receipt.
+ */
+export function isStreamableContainer(mediaType: string, head: Uint8Array): boolean {
+  if (mediaType.includes('webm')) return true;
+  if (!mediaType.includes('mp4')) return false;
+  let offset = 0;
+  while (offset + 8 <= head.length) {
+    const size =
+      (head[offset] << 24) | (head[offset + 1] << 16)
+      | (head[offset + 2] << 8) | head[offset + 3];
+    const type = String.fromCharCode(
+      head[offset + 4], head[offset + 5], head[offset + 6], head[offset + 7],
+    );
+    if (type === 'moov') return true;
+    if (type === 'mdat') return false;
+    if (size === 1) {
+      if (offset + 16 > head.length) return false;
+      const hi =
+        (head[offset + 8] << 24) | (head[offset + 9] << 16)
+        | (head[offset + 10] << 8) | head[offset + 11];
+      const lo =
+        (head[offset + 12] << 24) | (head[offset + 13] << 16)
+        | (head[offset + 14] << 8) | head[offset + 15];
+      const big = hi * 2 ** 32 + (lo >>> 0);
+      if (big <= 0 || big > head.length - offset) return false;
+      offset += big;
+    } else if (size === 0) {
+      return false;
+    } else if (size < 8) {
+      return false;
+    } else {
+      offset += size;
+    }
+  }
+  return false;
 }
 
 // -------- Resume helpers (F-resume) --------

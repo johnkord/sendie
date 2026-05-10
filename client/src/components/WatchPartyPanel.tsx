@@ -221,13 +221,13 @@ export function WatchPartyPanel() {
             </div>
           )}
 
-          {/* FOLLOWER in forward mode without a file yet: show transfer progress */}
-          {state.role === 'follower' && state.mode === 'forward' && !state.localFile && (
+          {/* FOLLOWER in forward mode without a file or playbackUrl yet: show transfer progress */}
+          {state.role === 'follower' && state.mode === 'forward' && !state.localFile && !state.playbackUrl && (
             <ForwardReceiverProgress state={state} onLeave={handleLeave} />
           )}
 
-          {/* HOST or FOLLOWER once we have a file: show the player */}
-          {state.localFile && (
+          {/* HOST or FOLLOWER once we have something to play: show the player */}
+          {(state.localFile || state.playbackUrl) && (
             <WatchPartyPlayer state={state} peers={peers} onLeave={handleLeave} />
           )}
 
@@ -272,13 +272,20 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   const [followerMuted, setFollowerMuted] = useState(false);
 
   // Convert the File to an object URL exactly once. Revoke on unmount
-  // to free the kernel-side resources.
+  // to free the kernel-side resources. If the service has set an
+  // explicit playbackUrl (e.g. a MediaSource URL for F-progressive),
+  // use that instead of creating one from the File. The service owns
+  // that URL's lifecycle.
   useEffect(() => {
+    if (state.playbackUrl) {
+      setObjectUrl(state.playbackUrl);
+      return;
+    }
     if (!state.localFile) return;
     const url = URL.createObjectURL(state.localFile);
     setObjectUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [state.localFile]);
+  }, [state.localFile, state.playbackUrl]);
 
   // Bind the video element to the watch-party service. Service sets up
   // the drift loop on followers and event forwarding on the host.
@@ -380,6 +387,25 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     watchPartyService.hostSetPlaybackRate(rate);
   };
 
+  // Picture-in-Picture toggle. Available in Chrome / Edge / Firefox /
+  // Safari (desktop). The pop-out window is browser-managed so it
+  // survives switching tabs; sync continues because the underlying
+  // <video> element doesn't move (only its rendering surface does).
+  const pipSupported = typeof document !== 'undefined' && document.pictureInPictureEnabled;
+  const handlePip = async () => {
+    const el = videoRef.current;
+    if (!el) return;
+    try {
+      if (document.pictureInPictureElement === el) {
+        await document.exitPictureInPicture();
+      } else {
+        await el.requestPictureInPicture();
+      }
+    } catch (err) {
+      console.warn('[watch-party] picture-in-picture request failed:', err);
+    }
+  };
+
   // Render readiness summary: ready / total accepted (excluding idle).
   const readyCount = Array.from(peers.values()).filter((p) => p.state === 'ready').length;
   const totalCount = peers.size;
@@ -401,6 +427,15 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
           <span title={`${readyCount} of ${totalCount} peers ready`}>
             {readyCount}/{totalCount} ready
           </span>
+          {pipSupported && (
+            <button
+              onClick={handlePip}
+              className="px-2 py-1 rounded text-xs text-slate-300 hover:text-slate-100 hover:bg-white/5 transition-colors"
+              title="Picture-in-Picture (pop video into a floating window)"
+            >
+              ⧉ PiP
+            </button>
+          )}
           <button
             onClick={onLeave}
             className="px-2 py-1 rounded text-xs text-slate-300 hover:text-red-400 hover:bg-red-500/10 transition-colors"
@@ -554,6 +589,8 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
           onPause={handlePause}
           onSeek={handleSeek}
           onRate={handleRate}
+          peers={peers}
+          selfPeerId={state.hostPeerId}
         />
       )}
 
@@ -570,9 +607,11 @@ interface HostControlsProps {
   onPause: () => void;
   onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onRate: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  peers: ReadonlyMap<string, WatchPartyPeerInfo>;
+  selfPeerId: string | null;
 }
 
-function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSeek, onRate }: HostControlsProps) {
+function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSeek, onRate, peers, selfPeerId }: HostControlsProps) {
   const [paused, setPaused] = useState(true);
   const [time, setTime] = useState(0);
 
@@ -631,16 +670,42 @@ function HostControls({ duration, videoRef, playbackRate, onPlay, onPause, onSee
       >
         10s ⏩
       </button>
-      <input
-        type="range"
-        min={0}
-        max={duration}
-        step={0.5}
-        value={time}
-        onChange={onSeek}
-        className="flex-1 min-w-[8rem] accent-purple-500"
-        title={`Seek (synced for everyone) — ${fmtTime(time)} / ${fmtTime(duration)}`}
-      />
+      <div className="relative flex-1 min-w-[8rem]">
+        <input
+          type="range"
+          min={0}
+          max={duration}
+          step={0.5}
+          value={time}
+          onChange={onSeek}
+          className="w-full accent-purple-500"
+          title={`Seek (synced for everyone) — ${fmtTime(time)} / ${fmtTime(duration)}`}
+        />
+        {/* Per-peer playhead dots overlaid on the seekbar. Reuses the
+            mediaTime each follower already broadcasts in wp-peer-state.
+            pointer-events-none so they don't block the slider. */}
+        {duration > 0 && (
+          <div className="pointer-events-none absolute inset-0 flex items-center">
+            {Array.from(peers.values())
+              .filter((p) => p.peerId !== selfPeerId && typeof p.mediaTime === 'number')
+              .map((p) => {
+                const pct = Math.min(100, Math.max(0, (p.mediaTime! / duration) * 100));
+                const color =
+                  p.state === 'idle'      ? 'bg-slate-400'  :
+                  p.state === 'buffering' ? 'bg-amber-400'  :
+                                            'bg-emerald-400';
+                return (
+                  <span
+                    key={p.peerId}
+                    className={`absolute h-2 w-2 rounded-full border border-slate-900 -translate-x-1/2 ${color}`}
+                    style={{ left: `${pct}%` }}
+                    title={`${p.peerId.slice(0, 8)}: ${fmtTime(p.mediaTime!)}`}
+                  />
+                );
+              })}
+          </div>
+        )}
+      </div>
       <span className="text-xs font-mono text-slate-400 tabular-nums">
         {fmtTime(time)} / {fmtTime(duration)}
       </span>
