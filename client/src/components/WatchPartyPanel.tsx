@@ -315,6 +315,20 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   }, [objectUrl]);
 
   const isHost = state.role === 'host';
+  // Forward-mode host gate: don't autoplay until every receiver has
+  // gotten the whole file. Otherwise host plays alone for several
+  // seconds while the bytes are still on the wire.
+  const allPeersReceived = (() => {
+    if (state.mode !== 'forward' || !isHost) return true;
+    const followers = Array.from(peers.values()).filter((p) => p.peerId !== state.hostPeerId);
+    if (followers.length === 0) return false; // no peers yet, wait
+    // Use forwardProgress map (set by the service per peer).
+    for (const f of followers) {
+      const pct = state.forwardProgress.get(f.peerId) ?? 0;
+      if (pct < 1) return false;
+    }
+    return true;
+  })();
 
   // Host controls: explicit buttons rather than relying solely on the
   // <video controls> attribute, because we want to route them through
@@ -387,10 +401,49 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             // host's local playback does NOT silence what peers receive.
             // The host can click the speaker icon to unmute for
             // themselves.
-            autoPlay={isHost}
+            // Host autoplay only when ready to start. In forward mode
+            // we wait for every receiver to finish the transfer; if
+            // we autoplay now, the host watches alone for several
+            // seconds while the bytes are still in flight.
+            autoPlay={isHost && allPeersReceived}
             muted={(isHost && state.mode === 'stream') || (!isHost && followerMuted)}
             className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
           />
+          {/* Forward-mode host gate: hold playback until all peers
+              have received the file. Shows current per-peer progress.
+              Disappears as soon as all peers hit 100%. */}
+          {isHost && state.mode === 'forward' && !allPeersReceived && !decodeError && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 text-white p-4">
+              <span className="text-2xl">📡</span>
+              <span className="text-sm font-medium">Sending to viewers...</span>
+              <div className="w-full max-w-xs space-y-1">
+                {Array.from(peers.values())
+                  .filter((p) => p.peerId !== state.hostPeerId)
+                  .map((p) => {
+                    const pct = Math.round((state.forwardProgress.get(p.peerId) ?? 0) * 100);
+                    return (
+                      <div key={p.peerId} className="text-[11px]">
+                        <div className="flex justify-between gap-2">
+                          <span className="font-mono truncate">{p.peerId.slice(0, 8)}</span>
+                          <span className="tabular-nums">{pct}%</span>
+                        </div>
+                        <div className="h-1 rounded bg-slate-700 overflow-hidden">
+                          <div className="h-full bg-purple-400 transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                {peers.size <= 1 && (
+                  <p className="text-[11px] text-slate-300 text-center">
+                    Waiting for at least one viewer to join...
+                  </p>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Playback will start automatically when everyone is ready.
+              </p>
+            </div>
+          )}
           {/* Stream-mode host overlay: shows whenever we don't yet have
               live tracks flowing. The big button forces a play() on a
               fresh user-gesture click, which always succeeds. */}
