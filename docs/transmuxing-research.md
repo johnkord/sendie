@@ -522,3 +522,147 @@ The user-perceived improvement from "wait 30 s for full transfer"
 to "play in 2 s" is real, but not worth shipping a broken receiver
 to chase. Stay disabled until one of the above paths produces
 something that actually plays in dogfooding.
+
+---
+
+## Autopsy 2: the Service Worker byte-range proxy attempt (2026-05-10)
+
+After the mp4box.js MSE attempt was rolled back, we tried option 4
+from the alternatives section: instead of MSE, use a Service Worker
+to back a synthetic `/wp-stream/<sessionId>` URL that the receiver's
+`<video>` would fetch via byte-range requests. The SW would proxy
+those range requests over the data channel to the host, host slices
+the file, returns bytes, SW fulfills the original fetch.
+
+Architecturally this should have worked: the browser's native
+demuxer parses the file (any container `<video>` plays directly),
+no MSE involvement, no transmux needed.
+
+It didn't work either. Catalog of what we hit:
+
+### Issue 1: Service Worker scope mismatch
+
+Our first attempt registered the SW at `/wp-stream/sw.js` with
+scope `/wp-stream/`. The page lives at `/multipeer/<id>`. The SW
+only intercepts fetches initiated by clients **within its scope**;
+since the page is out of scope, the SW's `fetch` handler never
+ran. The `/wp-stream/<id>` request went straight to nginx, hit
+`try_files $uri $uri/ /index.html`, and the SPA's index.html came
+back as the response. `<video>` got HTML, threw "no supported
+sources".
+
+**Fix attempted:** moved SW to `/wp-stream-sw.js` with scope `/`.
+That part worked: SW would now be in scope to intercept any
+`/wp-stream/*` fetch from any page on the origin.
+
+### Issue 2: clients API can't reach a page that isn't controlled
+
+Even with the wider scope, the SW's `clients.get(clientId)` could
+return null if the page registered the SW and immediately tried to
+register a session before the SW had actually claimed control of
+the page. `controllerchange` would fire eventually, but on the
+first session-register we sometimes lost the round-trip.
+
+**Fix attempted:** switched from `clients` API to private
+`MessageChannel`. Page sends one `MessagePort` to the SW with the
+`register-session` message. SW posts range-requests on the port;
+page replies on the port. Independent of scope and controlling
+state.
+
+### Issue 3 (still unsolved): the receiver still doesn't play
+
+Even after both scope and channel fixes, dogfooding showed:
+
+- `<video>` fires `play()` "no supported sources" repeatedly.
+- Receiver shows "0% of the file delivered" indefinitely.
+- Host doesn't get any indication the receiver is connected.
+- Console doesn't surface a SW fetch interception, suggesting
+  the SW isn't actually running or its fetch handler isn't
+  installed for this scope.
+
+We didn't fully root-cause this before deciding to roll back. Likely
+suspects:
+
+1. **`controllerchange` race vs initial session registration.** The
+   SW takes time to activate after first install (`waiting` →
+   `installing` → `activated`). Our code waits for `activated` but
+   not for the page itself to be controlled, and posts to the SW
+   before `clients.matchAll()` would find the page. With the
+   MessageChannel approach this should still work because we transfer
+   the port directly... unless the SW garbage-collected the port
+   when no one is referencing it from the SW side (it's stored in
+   the `sessions` Map but if the SW shuts down between activation
+   and the next fetch, the Map is gone).
+2. **SW lifetime.** Service workers are aggressively unloaded by
+   browsers when idle. If the SW gets shut down between
+   register-session and the first fetch, our session Map is lost
+   and the fetch returns 404 "no such session". The fix is some
+   keepalive (post a heartbeat from the page periodically while a
+   session is live), but we didn't try it.
+3. **SW hard-refresh quirks.** Chrome sometimes serves a stale SW
+   on hard-refresh; the user may have been hitting an old version
+   that didn't have our latest fix. We didn't make the user
+   manually unregister the old SW between attempts.
+
+Each of these is fixable. None was fixed in this round.
+
+### What worked
+
+Mode C1 (chunked-forward, plain mp4 Blob URL) is rock-solid. We've
+been running on it the whole time. The user pays a "wait for full
+transfer" penalty (1-3 minutes for typical 30-100 MB clips on a
+home uplink) but then gets reliable playback that scrubs cleanly,
+mutes/unmutes correctly, and plays in any browser that handles
+the file natively.
+
+### Recommendation revised
+
+The progressive-playback feature is harder to build correctly than
+to enumerate the architectural options would suggest. We've now
+spent multiple days across two distinct approaches (mp4box+MSE,
+and SW byte-range proxy) and shipped neither. Each had a different
+class of subtle browser quirk we didn't fully chart.
+
+**Backout decision (2026-05-10):** revert both the mp4box and the
+SW proxy code. Keep the working chunked-forward path. Document
+both failed attempts here so the next attempt has a complete map
+of the terrain.
+
+When we come back to this:
+
+1. **Build a minimal repro outside Sendie first.** Both attempts
+   were debugged inside the full app where the failure mode
+   ("video doesn't play") had too many possible causes.
+2. **Test with `chrome://media-internals/`** for MSE attempts;
+   `chrome://serviceworker-internals/` for SW attempts. These give
+   actual error info that JavaScript can't see.
+3. **Be willing to spend a full day instrumenting the Service
+   Worker lifecycle** before declaring it works. Logs in `install`,
+   `activate`, every `fetch`, every `message`, every port message.
+   Verify the SW is actually receiving and responding to the
+   `<video>` fetch.
+4. **Test without the rest of Sendie.** A standalone HTML page
+   that creates a File from a hardcoded path and binds a SW URL is
+   the right test bench. If that doesn't work, nothing will.
+5. **Consider just shipping "wait then play."** The C1 path is
+   honestly fine for files under ~200 MB. We could add an ETA
+   indicator and a "skip to file save" button for big files and
+   call it done.
+
+The Service Worker approach is still architecturally cleaner than
+MSE and has my (the agent's) recommendation **after** a proper
+minimal-repro. But "I haven't verified the SW is firing at all"
+is the wrong place to start a feature.
+
+### Code that was reverted
+
+- `client/public/wp-stream-sw.js` (deleted)
+- `client/src/services/watchPartyStreamProxy.ts` (deleted)
+- `WatchPartyService.ts` reverted to the b2bc81d state
+  (sendie_wp_transmux=0 default, no byte-stream code path,
+  classic chunked forward as the only forward mode).
+- `types/index.ts` reverted (no wp-bytes-* messages).
+
+The mp4box.js dependency stays in package.json since the dynamic
+import path remains in the file (gated behind localStorage flag);
+removing it is a separate cleanup that can wait.

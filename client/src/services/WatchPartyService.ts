@@ -283,16 +283,6 @@ class WatchPartyService {
   // Follower: progress reported back to host every PROGRESS_ACK_EVERY chunks.
   private static readonly PROGRESS_ACK_EVERY = 32;
 
-  // Mode C2 (byte-range stream): in-flight range responses keyed by
-  // requestId. Each entry holds the chunk-index map until last=true
-  // arrives, then we assemble and ship to the SW.
-  private bytesPendingByRequestId: Map<number, {
-    chunks: Map<number, Uint8Array>;
-    totalReceived: number;
-    expectedEnd: number;
-    start: number;
-  }> = new Map();
-
   // -------- F-progressive (MSE) state --------
 
   // MediaSource for progressive playback. null if MSE was not attempted
@@ -349,9 +339,14 @@ class WatchPartyService {
         } else {
           this.sendTimeline(peerId);
         }
-        // Mode C late-joiner: announce byte-stream session.
-        if (this.state.mode === 'forward' && this.forwardSourceFile) {
-          this.sendBytesInit(peerId);
+        // Mode C late-joiner: start a fresh forward to this peer,
+        // but only if host prep is finished. If prep is still in
+        // flight, runHostPrep's callback will pick up this peer
+        // along with the rest of the room.
+        if (this.state.mode === 'forward'
+            && this.forwardSourceFile
+            && this.state.prepStatus === null) {
+          void this.startForwardTo(peerId);
         }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
         this.broadcastPeerState();
@@ -490,21 +485,24 @@ class WatchPartyService {
       this.broadcastTimeline();
       this.startHeartbeat();
     } else if (mode === 'forward') {
+      // Mode C: kick off a file forward to every currently-connected
+      // peer. The timeline heartbeat ALSO starts so followers can
+      // sync once they have the file. Late joiners will be picked up
+      // in onDataChannelOpen.
       this.forwardSourceFile = file;
       this.startHeartbeat();
-      // Mode C2: byte-range stream via Service Worker proxy on the
-      // receiver. Host announces wp-bytes-init and waits for range
-      // requests. Receiver's <video src=/wp-stream/<id>> issues range
-      // fetches that the SW translates to data-channel round-trips.
-      // Browser's own demuxer parses the file; works for any
-      // container the browser plays directly (mp4 / mov / mkv / webm
-      // — fmp4 not required, no transmux needed).
-      //
-      // Late joiners are also picked up in onDataChannelOpen below.
-      for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
-        if (peerId === myPeerId) continue;
-        this.sendBytesInit(peerId);
-      }
+      // Best-effort transmux pass: if the file is plain mp4 (not
+      // already fmp4 / webm), repackage to fmp4 so receivers can use
+      // the F-progressive MSE path. Failure is non-fatal; we fall
+      // through to forwarding the original bytes which still plays
+      // (just without progressive playback). See
+      // docs/transmuxing-research.md for the design.
+      void this.runHostPrep(file).then(() => {
+        for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
+          if (peerId === myPeerId) continue;
+          void this.startForwardTo(peerId);
+        }
+      });
     }
     // For stream mode: the UI must call attachStreamSourceElement() with
     // the host's <video>. captureStream and the wp-stream-start
@@ -765,17 +763,6 @@ class WatchPartyService {
     this.forwardSourceFile = null;
     this.receiveBuffers.clear();
     this.receiveTotalChunks = 0;
-    // Tear down byte-stream session if any.
-    this.bytesPendingByRequestId.clear();
-    if (this.state.sessionId) {
-      const sid = this.state.sessionId;
-      void (async () => {
-        try {
-          const { watchPartyStreamProxy } = await import('./watchPartyStreamProxy');
-          watchPartyStreamProxy.endSession(sid);
-        } catch { /* ignore */ }
-      })();
-    }
     if (this.receivedBlobUrl) {
       URL.revokeObjectURL(this.receivedBlobUrl);
       this.receivedBlobUrl = null;
@@ -1092,10 +1079,6 @@ class WatchPartyService {
       case 'wp-file-chunk-meta': return this.handleFileChunkMeta(peerId, msg);
       case 'wp-file-end': return this.handleFileEnd(peerId, msg);
       case 'wp-file-ack': return this.handleFileAck(peerId, msg);
-      case 'wp-bytes-init': void this.handleBytesInit(peerId, msg); return;
-      case 'wp-bytes-range-req': void this.handleBytesRangeReq(peerId, msg); return;
-      case 'wp-bytes-range-res': return this.handleBytesRangeRes(peerId, msg);
-      case 'wp-bytes-range-err': return this.handleBytesRangeErr(peerId, msg);
       case 'wp-end': return this.handleEnd(peerId, msg);
       case 'wp-host-request': return this.handleHostRequest(peerId, msg);
       case 'wp-host-grant': return this.handleHostGrant(peerId, msg);
@@ -1498,8 +1481,6 @@ class WatchPartyService {
    *
    * Enable per-host by setting localStorage.sendie_wp_transmux=1.
    */
-  // @ts-expect-error retained for potential rollback to chunked forward;
-  // see docs/transmuxing-research.md autopsy section.
   private async runHostPrep(file: File): Promise<void> {
     const enabled = (() => {
       try { return localStorage.getItem('sendie_wp_transmux') === '1'; }
@@ -1533,7 +1514,6 @@ class WatchPartyService {
     }
   }
 
-  // @ts-expect-error retained for potential rollback; see runHostPrep above.
   private async startForwardTo(peerId: string): Promise<void> {
     const file = this.forwardSourceFile;
     if (!file || this.state.role !== 'host') return;
@@ -1949,195 +1929,6 @@ class WatchPartyService {
     if (msg.chunkIndex > prev) {
       this.forwardAckedByPeer.set(peerId, msg.chunkIndex);
     }
-  }
-
-  // -------- Mode C2: byte-range stream (Service Worker proxy) --------
-
-  /** Host: announce the byte-stream session to a single peer. */
-  private sendBytesInit(peerId: string): void {
-    if (this.state.role !== 'host') return;
-    if (!this.state.sessionId || !this.forwardSourceFile) return;
-    const f = this.forwardSourceFile;
-    const msg: DataChannelMessage = {
-      type: 'wp-bytes-init',
-      sessionId: this.state.sessionId,
-      hostPeerId: this.state.hostPeerId ?? this.getMyPeerId(),
-      mediaName: f.name,
-      mediaSize: f.size,
-      mediaType: f.type || 'video/mp4',
-    };
-    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
-  }
-
-  /**
-   * Host: receiver asked for a byte range. Slice the file and send
-   * back as a sequence of base64-encoded chunks (16 KB each, same
-   * shape as wp-file-chunk-meta) terminated with `last: true`.
-   */
-  private async handleBytesRangeReq(
-    peerId: string,
-    msg: Extract<DataChannelMessage, { type: 'wp-bytes-range-req' }>,
-  ): Promise<void> {
-    if (this.state.role !== 'host') return;
-    if (msg.sessionId !== this.state.sessionId) return;
-    const file = this.forwardSourceFile;
-    if (!file) {
-      this.sendBytesRangeErr(peerId, msg.requestId, 'no source file');
-      return;
-    }
-    const start = Math.max(0, Math.min(msg.start, file.size - 1));
-    const end = Math.max(start, Math.min(msg.end, file.size - 1));
-    try {
-      const slice = file.slice(start, end + 1);
-      const buf = new Uint8Array(await slice.arrayBuffer());
-      // Chunk into 16 KB pieces. Same wire constraint as wp-file-chunk-meta.
-      const CHUNK_SIZE = 16 * 1024;
-      const totalChunks = Math.max(1, Math.ceil(buf.length / CHUNK_SIZE));
-      for (let i = 0; i < totalChunks; i++) {
-        const slc = buf.subarray(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, buf.length));
-        const b64 = bytesToBase64(slc);
-        const out: DataChannelMessage = {
-          type: 'wp-bytes-range-res',
-          sessionId: this.state.sessionId!,
-          requestId: msg.requestId,
-          chunkIndex: i,
-          data: b64,
-          last: i === totalChunks - 1,
-        };
-        multiPeerWebRTCService.sendTo(peerId, JSON.stringify(out));
-        // Backpressure: pause when local SCTP queue gets large.
-        while (multiPeerWebRTCService.getBufferedAmount(peerId) > 8 * 1024 * 1024) {
-          await new Promise((r) => setTimeout(r, 50));
-        }
-      }
-    } catch (err) {
-      const m = err instanceof Error ? err.message : String(err);
-      this.sendBytesRangeErr(peerId, msg.requestId, m);
-    }
-  }
-
-  private sendBytesRangeErr(peerId: string, requestId: number, error: string): void {
-    if (!this.state.sessionId) return;
-    const out: DataChannelMessage = {
-      type: 'wp-bytes-range-err',
-      sessionId: this.state.sessionId,
-      requestId,
-      error,
-    };
-    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(out));
-  }
-
-  /**
-   * Receiver: host announced byte-stream session. Register a SW
-   * session and bind playbackUrl so the <video> can fetch ranges.
-   */
-  private async handleBytesInit(
-    peerId: string,
-    msg: Extract<DataChannelMessage, { type: 'wp-bytes-init' }>,
-  ): Promise<void> {
-    if (this.state.role === 'host') return;
-    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
-    console.log('[watch-party] bytes-init: name=', msg.mediaName, 'size=', msg.mediaSize, 'type=', msg.mediaType);
-    this.state = {
-      ...this.state,
-      sessionId: msg.sessionId,
-      role: 'follower',
-      mode: 'forward',
-      hostPeerId: msg.hostPeerId,
-      mediaName: msg.mediaName,
-      mediaDuration: 0,
-      lastTimelineAt: this.localMono(),
-      error: null,
-    };
-    this.emitState();
-    this.startStaleWatchdog();
-
-    try {
-      const { watchPartyStreamProxy } = await import('./watchPartyStreamProxy');
-      const url = await watchPartyStreamProxy.startSession({
-        sessionId: msg.sessionId,
-        mediaSize: msg.mediaSize,
-        mediaType: msg.mediaType,
-        onRangeRequest: (req) => {
-          // Track this request so the response router can find it.
-          this.bytesPendingByRequestId.set(req.requestId, {
-            chunks: new Map(),
-            totalReceived: 0,
-            expectedEnd: req.end,
-            start: req.start,
-          });
-          const out: DataChannelMessage = {
-            type: 'wp-bytes-range-req',
-            sessionId: msg.sessionId,
-            requestId: req.requestId,
-            start: req.start,
-            end: req.end,
-          };
-          multiPeerWebRTCService.sendTo(peerId, JSON.stringify(out));
-        },
-      });
-      if (url) {
-        this.state = { ...this.state, playbackUrl: url };
-        this.emitState();
-        console.log('[watch-party] bytes-init: SW session ready, playbackUrl=', url);
-      } else {
-        console.warn('[watch-party] bytes-init: SW unavailable; cannot proceed');
-        this.surfaceError('Streaming requires Service Workers. Refresh and try again.');
-      }
-    } catch (err) {
-      console.warn('[watch-party] bytes-init: SW setup failed:', err);
-      this.surfaceError('Could not set up streaming. Refresh and try again.');
-    }
-  }
-
-  private handleBytesRangeRes(
-    _peerId: string,
-    msg: Extract<DataChannelMessage, { type: 'wp-bytes-range-res' }>,
-  ): void {
-    if (this.state.role === 'host') return;
-    if (msg.sessionId !== this.state.sessionId) return;
-    const pending = this.bytesPendingByRequestId.get(msg.requestId);
-    if (!pending) return;
-    const bytes = base64ToBytes(msg.data);
-    pending.chunks.set(msg.chunkIndex, bytes);
-    pending.totalReceived += bytes.length;
-    if (msg.last) {
-      // Assemble in chunkIndex order.
-      const ordered: Uint8Array[] = [];
-      let totalLen = 0;
-      const indices = Array.from(pending.chunks.keys()).sort((a, b) => a - b);
-      for (const i of indices) {
-        const c = pending.chunks.get(i)!;
-        ordered.push(c);
-        totalLen += c.length;
-      }
-      const out = new Uint8Array(totalLen);
-      let off = 0;
-      for (const c of ordered) {
-        out.set(c, off);
-        off += c.length;
-      }
-      this.bytesPendingByRequestId.delete(msg.requestId);
-      void this.deliverRangeToSW(msg.requestId, out.buffer);
-    }
-  }
-
-  private handleBytesRangeErr(
-    _peerId: string,
-    msg: Extract<DataChannelMessage, { type: 'wp-bytes-range-err' }>,
-  ): void {
-    if (this.state.role === 'host') return;
-    if (msg.sessionId !== this.state.sessionId) return;
-    this.bytesPendingByRequestId.delete(msg.requestId);
-    void (async () => {
-      const { watchPartyStreamProxy } = await import('./watchPartyStreamProxy');
-      watchPartyStreamProxy.failRange(msg.requestId, msg.error);
-    })();
-  }
-
-  private async deliverRangeToSW(requestId: number, data: ArrayBuffer): Promise<void> {
-    const { watchPartyStreamProxy } = await import('./watchPartyStreamProxy');
-    watchPartyStreamProxy.deliverRange(requestId, data);
   }
 }
 

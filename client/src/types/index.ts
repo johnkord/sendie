@@ -219,45 +219,6 @@ export type DataChannelMessage =
       chunkIndex: number;
     }
   // Host explicitly ends the session for everyone.
-  // Mode C2 (byte-range stream): host announces it can serve byte
-  // ranges of a file on demand. Receiver registers a Service Worker
-  // session keyed by sessionId, points <video src=/wp-stream/...>
-  // at it, and the SW translates byte-range fetches into
-  // wp-bytes-range-req over the data channel.
-  | {
-      type: 'wp-bytes-init';
-      sessionId: string;
-      hostPeerId: string;
-      mediaName: string;
-      mediaSize: number;
-      mediaType: string;
-    }
-  // Receiver -> host: please send these bytes.
-  | {
-      type: 'wp-bytes-range-req';
-      sessionId: string;
-      requestId: number;
-      start: number;
-      end: number; // inclusive
-    }
-  // Host -> receiver: piece of the requested range. Multiple chunks
-  // per request (16 KB each, base64-encoded). Receiver assembles
-  // them by chunkIndex and posts the result to the SW when last=true.
-  | {
-      type: 'wp-bytes-range-res';
-      sessionId: string;
-      requestId: number;
-      chunkIndex: number;
-      data: string; // base64
-      last: boolean;
-    }
-  // Host -> receiver: range request failed (file gone, range invalid, etc).
-  | {
-      type: 'wp-bytes-range-err';
-      sessionId: string;
-      requestId: number;
-      error: string;
-    }
   | { type: 'wp-end'; sessionId: string };
 
 // Crypto Types
