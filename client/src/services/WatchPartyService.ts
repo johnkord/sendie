@@ -1430,7 +1430,7 @@ class WatchPartyService {
       const { blob, mediaType } = await transmuxToFmp4(file, (p) => {
         this.state = {
           ...this.state,
-          prepStatus: { phase: 'transmux', progress: p.read },
+          prepStatus: { phase: 'transmux', progress: p.progress },
         };
         this.emitState();
       });

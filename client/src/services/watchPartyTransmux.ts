@@ -54,16 +54,27 @@ interface MP4BoxModule {
 
 /** Soft cap. Above this we skip transmux and fall back to wait-for-receipt. */
 export const TRANSMUX_MAX_BYTES = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
-/** Below this we skip transmux: variant C1 (wait-for-receipt) is fast enough. */
-export const TRANSMUX_MIN_BYTES = 200 * 1024 * 1024; // 200 MB
+/**
+ * Below this we skip transmux: the file is small enough that the
+ * receiver finishes the C1 wait-for-full-receipt before transmux
+ * would finish. 5 MB is conservative; on typical p2p data channels
+ * (5-50 Mbps) a 5 MB transfer is 1-8 seconds, and transmux of a 5 MB
+ * mp4 is sub-100ms, so we still benefit. We could remove this floor
+ * entirely, but keeping it avoids the visible 'Preparing...' overlay
+ * for trivial files where it would feel pointless.
+ */
+export const TRANSMUX_MIN_BYTES = 5 * 1024 * 1024; // 5 MB
 /** Read chunk size for the input. Big enough to keep mp4box's parser busy without spiking JS heap. */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MB
 
 export type TransmuxProgress = {
-  /** 0..1 of bytes read from input. */
-  read: number;
-  /** Bytes written so far. */
-  bytesWritten: number;
+  /**
+   * 0..1 overall transmux progress. Combines bytes-read from input
+   * (~80% of the work) with segments-emitted past the read phase
+   * (~20% trailing). Without this weighting, callers see 100% while
+   * mp4box is still flushing remaining segments after the last read.
+   */
+  progress: number;
 };
 
 export interface TransmuxResult {
@@ -172,17 +183,27 @@ export async function transmuxToFmp4(
     throw new TransmuxError('too-large', `File is ${(file.size / 1e9).toFixed(1)} GB; max for browser-side transmux is 1.5 GB.`);
   }
 
-  // Dynamic import keeps the mp4box bundle (~340 KB gzipped) out of
+  // Dynamic import keeps the mp4box bundle (~35 KB gzipped) out of
   // the main bundle. Vite handles this automatically.
   const mp4boxModule = await import('mp4box') as unknown as MP4BoxModule;
   const mp4boxfile = mp4boxModule.createFile(/* keepMdatData = */ true);
 
   return new Promise<TransmuxResult>((resolve, reject) => {
     const parts: BlobPart[] = [];
-    let bytesWritten = 0;
     let mediaType: string | null = null;
     let segmentingStarted = false;
     let aborted = false;
+    // Progress weighting: reading the input is ~80% of the work,
+    // emitting segments after EOF is ~20%. We don't know the segment
+    // count up front, so we just report 80% on read-complete and let
+    // the caller see it climb to 100% as flush() returns.
+    let readFraction = 0;
+    let postReadFraction = 0;
+    const reportProgress = () => {
+      onProgress?.({
+        progress: Math.min(1, readFraction * 0.8 + postReadFraction * 0.2),
+      });
+    };
 
     const abort = (reason: TransmuxError | Error) => {
       if (aborted) return;
@@ -216,14 +237,16 @@ export async function transmuxToFmp4(
       for (const seg of initSegs) {
         const buf = new Uint8Array(seg.buffer);
         parts.push(buf);
-        bytesWritten += buf.length;
       }
       mp4boxfile.onSegment = (_id, _user, buffer, _sampleNumber, _last) => {
         if (aborted) return;
         const u8 = new Uint8Array(buffer);
         parts.push(u8);
-        bytesWritten += u8.length;
-        onProgress?.({ read: 1, bytesWritten });
+        // Each segment is roughly equal-size; bump postReadFraction
+        // a little. We can't know the total count, so use a soft
+        // exponential approach to 1.
+        postReadFraction = 1 - (1 - postReadFraction) * 0.95;
+        reportProgress();
       };
       // Begin emitting onSegment for any data already buffered, and
       // for incoming appendBuffer calls.
@@ -246,7 +269,8 @@ export async function transmuxToFmp4(
           (buf as AppendableArrayBuffer).fileStart = offset;
           mp4boxfile.appendBuffer(buf as AppendableArrayBuffer);
           offset = end;
-          onProgress?.({ read: offset / total, bytesWritten });
+          readFraction = offset / total;
+          reportProgress();
         }
         if (aborted) return;
         mp4boxfile.flush();
@@ -256,6 +280,8 @@ export async function transmuxToFmp4(
           abort(new TransmuxError('unsupported-input', 'mp4box never reported a moov; cannot transmux.'));
           return;
         }
+        postReadFraction = 1;
+        reportProgress();
         const blobType = (mediaType ?? 'video/mp4').split(';')[0].trim();
         const blob = new Blob(parts, { type: blobType });
         resolve({ mediaType: mediaType ?? 'video/mp4', blob });
