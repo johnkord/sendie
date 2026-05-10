@@ -41,7 +41,7 @@ export function WatchPartyPanel() {
   // Mode chosen at the IDLE prompt; remembered until the file is
   // selected. 'stream' (default) lets receivers join with no setup.
   // 'local' is the BYO-file fallback.
-  const [pendingMode, setPendingMode] = useState<'stream' | 'local'>('stream');
+  const [pendingMode, setPendingMode] = useState<'forward' | 'local'>('forward');
 
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -100,7 +100,7 @@ export function WatchPartyPanel() {
               <div className="grid gap-2">
                 <label
                   className={`flex items-start gap-2 p-2 rounded border cursor-pointer transition-colors ${
-                    pendingMode === 'stream'
+                    pendingMode === 'forward'
                       ? 'border-purple-500/60 bg-purple-500/10'
                       : 'border-slate-700/50 hover:bg-white/5'
                   }`}
@@ -108,18 +108,20 @@ export function WatchPartyPanel() {
                   <input
                     type="radio"
                     name="wp-mode"
-                    value="stream"
-                    checked={pendingMode === 'stream'}
-                    onChange={() => setPendingMode('stream')}
+                    value="forward"
+                    checked={pendingMode === 'forward'}
+                    onChange={() => setPendingMode('forward')}
                     className="mt-1 accent-purple-500"
                   />
                   <span className="text-xs">
                     <span className="block text-slate-200 font-medium">
-                      Stream live (recommended)
+                      Send and watch (recommended)
                     </span>
                     <span className="block text-slate-500">
-                      You play the file, friends watch it streamed in real time. No setup
-                      for them. Up to 4 viewers.
+                      You pick a file. Sendie sends it to everyone over the existing
+                      peer connections, then we play it together with synced controls.
+                      Receivers don&apos;t need their own copy. Time to first frame
+                      depends on the slowest receiver&apos;s connection.
                     </span>
                   </span>
                 </label>
@@ -140,12 +142,11 @@ export function WatchPartyPanel() {
                   />
                   <span className="text-xs">
                     <span className="block text-slate-200 font-medium">
-                      Local-file sync
+                      Local-file sync (skip transfer)
                     </span>
                     <span className="block text-slate-500">
-                      Everyone loads their own copy of the same file; Sendie just syncs
-                      play, pause, and seek. Best quality and works for big rooms, but
-                      every peer needs the file already.
+                      Use this when every viewer ALREADY has the same file on disk.
+                      Plays instantly, but each viewer has to pick their copy.
                     </span>
                   </span>
                 </label>
@@ -186,14 +187,14 @@ export function WatchPartyPanel() {
             </div>
           )}
 
-          {/* HOST in either mode (with a file), or FOLLOWER in local mode with a file: show local-source player */}
-          {state.localFile && (
-            <WatchPartyPlayer state={state} peers={peers} onLeave={handleLeave} />
+          {/* FOLLOWER in forward mode without a file yet: show transfer progress */}
+          {state.role === 'follower' && state.mode === 'forward' && !state.localFile && (
+            <ForwardReceiverProgress state={state} onLeave={handleLeave} />
           )}
 
-          {/* FOLLOWER in stream mode: show the incoming RTC stream */}
-          {state.role === 'follower' && state.mode === 'stream' && (
-            <StreamFollowerView state={state} peers={peers} onLeave={handleLeave} />
+          {/* HOST or FOLLOWER once we have a file: show the player */}
+          {state.localFile && (
+            <WatchPartyPlayer state={state} peers={peers} onLeave={handleLeave} />
           )}
 
           <input
@@ -557,84 +558,49 @@ interface StreamFollowerProps {
   onLeave: () => void;
 }
 
-function StreamFollowerView({ state, peers, onLeave }: StreamFollowerProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [hasStream, setHasStream] = useState<boolean>(() => watchPartyService.getRemoteStream() !== null);
-  const [needsClickToPlay, setNeedsClickToPlay] = useState(false);
+// Suppress unused warnings; props kept exported for ABI stability while
+// we migrate other code that imports them.
+export type { StreamFollowerProps as _StreamFollowerProps };
 
-  // Subscribe to remote-stream changes from the service. When the host's
-  // RTC track lands, bind it to <video srcObject> and play().
-  useEffect(() => {
-    const bind = () => {
-      const stream = watchPartyService.getRemoteStream();
-      const el = videoRef.current;
-      if (!el) return;
-      if (stream) {
-        if (el.srcObject !== stream) {
-          el.srcObject = stream;
-        }
-        // play() may be rejected by autoplay policy if the user has
-        // not gestured. Show a 'click to play' prompt rather than
-        // silently failing.
-        el.play().then(() => setNeedsClickToPlay(false)).catch(() => setNeedsClickToPlay(true));
-        setHasStream(true);
-      } else {
-        el.srcObject = null;
-        setHasStream(false);
-      }
-    };
-    bind();
-    const off = watchPartyService.onRemoteStreamChanged(bind);
-    return () => { off(); };
-  }, []);
-
+function ForwardReceiverProgress({
+  state,
+  onLeave,
+}: {
+  state: WatchPartyState;
+  onLeave: () => void;
+}) {
+  const hostId = state.hostPeerId ?? '';
+  const pct = Math.round(((state.forwardProgress.get(hostId) ?? 0) * 100));
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2 text-xs text-slate-400 flex-wrap">
-        <div className="min-w-0">
-          <span className="truncate font-mono text-slate-300" title={state.mediaName ?? ''}>
-            {state.mediaName || 'Streaming'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {!hasStream && <span className="text-slate-500">connecting…</span>}
-          <button
-            onClick={onLeave}
-            className="px-2 py-1 rounded text-xs text-slate-300 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Leave the watch party"
-          >
-            Leave
-          </button>
-        </div>
+      <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+        <span className="truncate font-mono text-slate-300" title={state.mediaName ?? ''}>
+          {state.mediaName || 'Receiving file...'}
+        </span>
+        <button
+          onClick={onLeave}
+          className="px-2 py-1 rounded text-xs text-slate-300 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+        >
+          Leave
+        </button>
       </div>
-      <div className="relative">
-        <video
-          ref={videoRef}
-          // No controls; the host owns the timeline. Mute toggle could be
-          // wired later; for v1.5 the user uses the system volume.
-          playsInline
-          autoPlay
-          className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
-        />
-        {needsClickToPlay && (
-          <button
-            onClick={() => {
-              videoRef.current?.play().then(() => setNeedsClickToPlay(false)).catch(() => {});
-            }}
-            className="absolute inset-0 flex items-center justify-center bg-black/60 text-white text-sm font-medium"
-          >
-            ▶ Click to start watching
-          </button>
-        )}
+      <div className="rounded bg-slate-950/60 border border-slate-700 p-3 space-y-2">
+        <p className="text-xs text-slate-300">
+          Receiving from host... playback will start automatically when the file finishes.
+        </p>
+        <div className="h-2 rounded bg-slate-800 overflow-hidden">
+          <div
+            className="h-full bg-purple-500 transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="text-[11px] text-slate-500 tabular-nums">{pct}%</p>
       </div>
-      <PeerStrip peers={peers} duration={state.mediaDuration} />
     </div>
   );
 }
 
 function CodecSupportBanner() {
-  // Probe the most useful container/codec combos. canPlayType returns
-  // 'probably' / 'maybe' / '' (empty); 'maybe' is treated as supported.
   const probe = (() => {
     if (typeof document === 'undefined') return null;
     const v = document.createElement('video');

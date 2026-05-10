@@ -172,6 +172,125 @@ can override. A is a "quick join" option visible only when both
 the host and the joiner already have a file with the same name on
 disk; it stays an escape hatch, not the headline path.
 
+## 2.6. Why Mode B (live re-encode stream) was abandoned
+
+We shipped Mode B as the headline default in v1.5 and it failed
+dogfooding immediately. The failures clustered into three classes,
+all rooted in the same architectural mistake.
+
+### Failure 1: Firefox cannot decode H.264/AAC mp4 on Linux
+Mozilla cannot redistribute H.264 codecs under their licensing.
+Firefox on Linux ships without H.264 / AAC unless the user has
+installed system `ffmpeg` and `gstreamer-libav` and restarted the
+browser. For a file-transfer app aimed at "any browser", we cannot
+rely on this. The browser literally cannot decode the file we are
+trying to capture from. `captureStream()` on a `<video>` element
+that won't play yields nothing.
+
+### Failure 2: `HTMLMediaElement.captureStream()` is a young API
+Per MDN browser compat: `HTMLMediaElement.captureStream()` only
+reached "Full support" in Firefox 149 (late 2025). Earlier Firefox
+versions either don't have it or had it behind a pref. Even where
+present, captureStream-derived tracks have historically had encoder
+edge cases on Firefox (per Bugzilla 1219711 and family). Safari and
+Safari iOS have **no support at all**, ever. Pinning the headline
+feature to a Chrome-and-Firefox-149+ API leaves a substantial
+fraction of the audience with no working path.
+
+### Failure 3: Autoplay policy + captureStream interaction
+`captureStream()` returns a MediaStream with zero tracks until the
+source element actually plays. Browsers without Media Engagement
+Index for the site refuse autoplay-with-sound. Muted autoplay is
+allowed but feels broken on a "watch party" host. The whole flow
+becomes an autoplay-policy whack-a-mole that we lost.
+
+### The shared root cause
+Mode B asks the **host** to decode and re-encode, then ships the
+re-encoded stream through WebRTC's encoder per peer. That's three
+fragile dependencies (decode the source, encode for WebRTC, get
+SDP renegotiation working with captureStream) for a feature whose
+input is "a file on the host's disk". The host doesn't need to
+**play** the file. They need to **transmit** it.
+
+This is exactly the shape of the problem Sendie's
+`MultiPeerFileTransferService` already solves. So we do that.
+
+## 2.7. Mode C revisited: live forwarding (the new headline default)
+
+**Premise:** the host's role in a watch party is "ship the bytes",
+not "render and re-encode". Re-uses Sendie's flow-controlled file
+transfer wholesale. Receivers decode locally with whatever codecs
+their browser supports, just like normal playback.
+
+### Variant C1: Wait-for-receipt then play (simple)
+Host triggers `MultiPeerFileTransferService.broadcastFile()` on
+the chosen file. Watch-party panel shows a transfer progress bar
+per peer. The host's play button is disabled until at least one
+peer has fully received; it becomes "Play (1/3 ready)" then "Play
+(3/3 ready)" as more land. On click, the room enters synced-state
+mode (the v1 timeline algorithm) playing from the now-local Blob
+URL.
+
+**Pros:** dead simple, original quality, independent scrubbing,
+works on every browser that can play the file, leverages the
+file-transfer code path that's already battle-tested. The host
+sees the same progress UI as a regular Sendie transfer.
+
+**Cons:** slowest peer's transfer time = time-to-first-frame.
+Storage cost is N gigabytes per peer for big movies. A 2 GB file
+over a 50 Mbps consumer uplink is ~6 minutes wait.
+
+### Variant C2: Progressive playback (streaming-ish)
+The receiver doesn't wait for full receipt. As bytes arrive on
+the data channel, they get piped into a Blob (for files) or a
+SourceBuffer (via Media Source Extensions, for true progressive
+playback). Play starts as soon as enough bytes are buffered to
+decode the first GOP.
+
+**Pros:** time-to-first-frame is roughly one keyframe-interval +
+network latency (seconds, not minutes). Storage on the receiver
+is still N GB total but writes happen incrementally. Feels like
+Netflix to the receiver.
+
+**Cons:** the file has to be streamable in receive order. mp4
+with `moov` at the end (the default for many camera apps) is
+NOT streamable until the last byte; the receiver can't decode
+without the metadata atom. We need either:
+- A pre-flight pass on the host that checks `moov` position and
+  "fast-starts" the file (rewrite to put `moov` first) before
+  sending, OR
+- Acknowledge this and require fast-start mp4 / WebM (which is
+  always streamable since headers are at the start).
+
+The MSE path also forces a per-codec mime-string that we have to
+detect. fmp4 (CMAF) is preferred but we'd need to repackage on
+the host, which defeats the simplicity. WebM is the easy path.
+
+### Variant C3: Hybrid: progressive playback with file-transfer fallback
+Attempt MSE-based progressive playback. On MIME / fragmentation
+errors, fall back to "wait for full receipt" (variant C1). Both
+paths share the post-receipt synced timeline machinery; the
+difference is only in when playback can start.
+
+This is what we ship as v2. The first cut is C1 (simple) so we
+have a working fallback; C2 lands as a follow-up incrementally
+without changing the wire format.
+
+### Receiver autoplay still applies
+Even with the bytes on disk, receivers face the same browser
+autoplay-with-sound policy. The first time a follower joins, they
+see a "▶ Click to start watching" overlay. After the first user
+gesture, subsequent host-driven plays work without interaction.
+Same pattern as YouTube, Twitch, Vimeo.
+
+### What this means for Mode B
+Mode B is removed. The implementation cost (encoder caps, RTC
+fanout, captureStream state machine, autoplay overlays, codec
+negotiation, mute-but-not-mute audio routing) is paid for nothing
+since C delivers a strictly better experience for almost every
+case. We keep Mode A (BYO local file) as a niche escape hatch for
+peers who already have the file and want to skip the transfer.
+
 ## 3. The sync algorithm
 
 Three layers, each with concrete tradeoffs.

@@ -168,10 +168,12 @@ export type DataChannelMessage =
   // would auto-grant.
   | { type: 'wp-host-request'; sessionId: string }
   | { type: 'wp-host-grant'; sessionId: string; newHostPeerId: string }
-  // Live-stream mode: host announces it is sharing the rendered output
-  // of a media element via WebRTC tracks (captureStream). Followers
-  // match incoming tracks against streamId. No clock-sync needed in
-  // this mode; RTP timestamps drive A/V sync.
+  // Live-stream mode (DEPRECATED in v2): host announces it is sharing
+  // the rendered output of a media element via WebRTC tracks
+  // (captureStream). Removed because Firefox-on-Linux can't decode
+  // H.264, captureStream is uneven across browsers, and Mode C
+  // (forward-then-play) is strictly better. Kept here so old
+  // serialized messages don't crash the parser.
   | {
       type: 'wp-stream-start';
       sessionId: string;
@@ -179,6 +181,42 @@ export type DataChannelMessage =
       streamId: string;
       mediaName: string;
       mediaDuration: number;
+    }
+  // Mode C (forward-then-play): host sends the file bytes to every
+  // peer over the data channel, peers buffer in memory, then the room
+  // enters synced-state playback (Mode A timeline algorithm) using
+  // the resulting Blob URLs. Decoupled from MultiPeerFileTransferService
+  // so it doesn't compete for OPFS / save-to-disk plumbing.
+  | {
+      type: 'wp-file-start';
+      sessionId: string;
+      hostPeerId: string;
+      mediaName: string;
+      mediaSize: number;
+      mediaType: string;  // MIME, e.g. 'video/mp4'; receiver hints <video>
+      totalChunks: number;
+    }
+  | {
+      type: 'wp-file-chunk-meta';
+      sessionId: string;
+      chunkIndex: number;
+      // Base64-encoded bytes for this chunk. We embed in JSON rather
+      // than sending as a separate binary message so we don't fight
+      // MultiPeerFileTransferService for ArrayBuffer ownership on
+      // the shared data channel. 33% inflation is acceptable; the
+      // win is total isolation.
+      data: string;
+    }
+  | {
+      type: 'wp-file-end';
+      sessionId: string;
+    }
+  // Receiver -> sender ACK so host can throttle. Periodic, every N
+  // chunks. Same idea as file-progress in MultiPeerFileTransferService.
+  | {
+      type: 'wp-file-ack';
+      sessionId: string;
+      chunkIndex: number;
     }
   // Host explicitly ends the session for everyone.
   | { type: 'wp-end'; sessionId: string };

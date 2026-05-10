@@ -74,7 +74,27 @@ const STALE_TIMELINE_MS = TIMELINE_HEARTBEAT_MS * 3 + 1000;
 const MAX_STREAM_PEERS = 4;
 
 export type WatchPartyRole = 'host' | 'follower' | 'idle';
-export type WatchPartyMode = 'local' | 'stream';
+// 'local' = each peer plays their own local copy. 'forward' = host sends
+// the file bytes to peers via the data channel; peers play from the
+// resulting in-memory Blob URL with the timeline algorithm. 'stream'
+// (legacy, kept for type-compat) = captureStream-based live re-encode;
+// removed from the UI in v2 because it's brittle on Firefox / Safari
+// (see docs section 2.6).
+export type WatchPartyMode = 'local' | 'forward' | 'stream';
+
+// --- Mode C (forward) tuning ---
+
+// Chunk size for the in-watch-party file forward. 16 KB is well below
+// the SCTP message ceiling on every browser (Firefox tops out around
+// 256 KB; Chrome 64 KB for some configs). Keep small to minimize
+// head-of-line blocking with chat / timeline messages on the same
+// channel.
+const FORWARD_CHUNK_SIZE = 16 * 1024;
+// Pause sending when local SCTP buffered amount exceeds this many
+// bytes; resume after the channel drains. We poll instead of using
+// the bufferedamountlow event because the file-transfer service
+// also subscribes to that event.
+const FORWARD_HIGH_WATERMARK = 8 * 1024 * 1024;
 
 export interface WatchPartyState {
   // Stable id assigned at session start by the host. Followers ignore
@@ -95,7 +115,13 @@ export interface WatchPartyState {
   localFile: File | null;
   // Stream id the host advertised in stream mode. Followers use this
   // to match incoming WebRTC tracks to this watch-party.
+  // Repurposed in Mode C: kept null. (Field retained to keep the
+  // serialized state shape stable while the UI migrates.)
   streamId: string | null;
+  // Mode C: per-peer file-forward progress (0..1). Host: progress to
+  // each follower. Follower: their own receive progress (single value
+  // keyed by hostPeerId in the same map). null = not transferring.
+  forwardProgress: Map<string, number>;
   // Last-seen heartbeat info (followers only).
   lastTimelineAt: number;
   // Most recent error message surfaced for the UI; cleared on next
@@ -130,6 +156,7 @@ class WatchPartyService {
     mediaDuration: 0,
     localFile: null,
     streamId: null,
+    forwardProgress: new Map(),
     lastTimelineAt: 0,
     error: null,
   };
@@ -191,6 +218,27 @@ class WatchPartyService {
   // buffer). Keyed by streamId. Swept on TTL or claim.
   private pendingRemoteStreams: Map<string, MediaStream> = new Map();
 
+  // -------- Mode C (forward) state --------
+
+  // Host: the file we are forwarding, kept until the session ends so
+  // late joiners can request a re-send.
+  private forwardSourceFile: File | null = null;
+  // Host: per-peer chunks-acked counter.
+  private forwardAckedByPeer: Map<string, number> = new Map();
+  // Host: per-peer fan-out cancellers (so leave() can stop them).
+  private forwardCancelByPeer: Map<string, () => void> = new Map();
+
+  // Follower: incremental receive buffer. Cleared when the file is
+  // assembled into a Blob.
+  private receiveBuffers: Map<number, Uint8Array> = new Map();
+  private receiveTotalChunks = 0;
+  private receiveMimeType = 'video/mp4';
+  private receiveFileName = '';
+  // Follower: Blob URL for the assembled file. Revoked on leave.
+  private receivedBlobUrl: string | null = null;
+  // Follower: progress reported back to host every PROGRESS_ACK_EVERY chunks.
+  private static readonly PROGRESS_ACK_EVERY = 32;
+
   constructor() {
     multiPeerWebRTCService.on('onDataChannelMessage', (peerId, data) => {
       if (typeof data !== 'string') return;
@@ -223,6 +271,10 @@ class WatchPartyService {
           this.sendStreamStart(peerId);
         } else {
           this.sendTimeline(peerId);
+        }
+        // Mode C late-joiner: start a fresh forward to this peer.
+        if (this.state.mode === 'forward' && this.forwardSourceFile) {
+          void this.startForwardTo(peerId);
         }
       } else if (this.state.role !== 'idle' && this.state.sessionId) {
         this.broadcastPeerState();
@@ -343,6 +395,7 @@ class WatchPartyService {
       mediaDuration: 0, // populated when the video metadata loads
       localFile: file,
       streamId: null,
+      forwardProgress: new Map(),
       lastTimelineAt: this.localMono(),
       error: null,
     };
@@ -357,6 +410,17 @@ class WatchPartyService {
       // Send initial timeline so followers know what's happening.
       this.broadcastTimeline();
       this.startHeartbeat();
+    } else if (mode === 'forward') {
+      // Mode C: kick off a file forward to every currently-connected
+      // peer. The timeline heartbeat ALSO starts so followers can
+      // sync once they have the file. Late joiners will be picked up
+      // in onDataChannelOpen.
+      this.forwardSourceFile = file;
+      this.startHeartbeat();
+      for (const peerId of multiPeerWebRTCService.getOpenChannels()) {
+        if (peerId === myPeerId) continue;
+        void this.startForwardTo(peerId);
+      }
     }
     // For stream mode: the UI must call attachStreamSourceElement() with
     // the host's <video>. captureStream and the wp-stream-start
@@ -577,6 +641,17 @@ class WatchPartyService {
       URL.revokeObjectURL(this.streamSourceObjectUrl);
       this.streamSourceObjectUrl = null;
     }
+    // Mode C teardown.
+    for (const cancel of this.forwardCancelByPeer.values()) cancel();
+    this.forwardCancelByPeer.clear();
+    this.forwardAckedByPeer.clear();
+    this.forwardSourceFile = null;
+    this.receiveBuffers.clear();
+    this.receiveTotalChunks = 0;
+    if (this.receivedBlobUrl) {
+      URL.revokeObjectURL(this.receivedBlobUrl);
+      this.receivedBlobUrl = null;
+    }
     this.stopHeartbeat();
     this.stopStaleWatchdog();
     if (this.driftLoopCancel) { this.driftLoopCancel(); this.driftLoopCancel = null; }
@@ -589,6 +664,7 @@ class WatchPartyService {
       mediaDuration: 0,
       localFile: null,
       streamId: null,
+      forwardProgress: new Map(),
       lastTimelineAt: 0,
       error: null,
     };
@@ -774,6 +850,10 @@ class WatchPartyService {
       case 'wp-timeline': return this.handleTimeline(peerId, msg);
       case 'wp-peer-state': return this.handlePeerState(peerId, msg);
       case 'wp-stream-start': return this.handleStreamStart(peerId, msg);
+      case 'wp-file-start': return this.handleFileStart(peerId, msg);
+      case 'wp-file-chunk-meta': return this.handleFileChunkMeta(peerId, msg);
+      case 'wp-file-end': return this.handleFileEnd(peerId, msg);
+      case 'wp-file-ack': return this.handleFileAck(peerId, msg);
       case 'wp-end': return this.handleEnd(peerId, msg);
       case 'wp-host-request': return this.handleHostRequest(peerId, msg);
       case 'wp-host-grant': return this.handleHostGrant(peerId, msg);
@@ -1040,6 +1120,199 @@ class WatchPartyService {
   reset(): void {
     this.leave();
   }
+
+  // -------- Mode C: file-forward host side --------
+
+  private async startForwardTo(peerId: string): Promise<void> {
+    const file = this.forwardSourceFile;
+    if (!file || this.state.role !== 'host') return;
+    if (!multiPeerWebRTCService.isDataChannelOpen(peerId)) return;
+    let cancelled = false;
+    this.forwardCancelByPeer.set(peerId, () => { cancelled = true; });
+    const totalChunks = Math.ceil(file.size / FORWARD_CHUNK_SIZE);
+    const start: DataChannelMessage = {
+      type: 'wp-file-start',
+      sessionId: this.state.sessionId!,
+      hostPeerId: this.state.hostPeerId!,
+      mediaName: file.name,
+      mediaSize: file.size,
+      mediaType: file.type || 'video/mp4',
+      totalChunks,
+    };
+    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(start));
+    this.forwardAckedByPeer.set(peerId, 0);
+    this.state.forwardProgress.set(peerId, 0);
+    this.emitState();
+    for (let i = 0; i < totalChunks; i++) {
+      if (cancelled) return;
+      // Backpressure: wait until SCTP buffered bytes drop below the
+      // low watermark. Conservative; we accept slower sends in
+      // exchange for not exhausting browser-side buffers.
+      while (
+        !cancelled
+        && multiPeerWebRTCService.getBufferedAmount(peerId) > FORWARD_HIGH_WATERMARK
+      ) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Also wait until receiver hasn't fallen too far behind on
+      // ACKs. Lets us drop the chunked send if the receiver has
+      // stalled.
+      while (
+        !cancelled
+        && (this.forwardAckedByPeer.get(peerId) ?? 0) + 256 < i
+      ) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const slice = file.slice(i * FORWARD_CHUNK_SIZE, (i + 1) * FORWARD_CHUNK_SIZE);
+      const buf = await slice.arrayBuffer();
+      const b64 = bytesToBase64(new Uint8Array(buf));
+      const msg: DataChannelMessage = {
+        type: 'wp-file-chunk-meta',
+        sessionId: this.state.sessionId!,
+        chunkIndex: i,
+        data: b64,
+      };
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
+      // Approximate progress (host's view) using i+1.
+      this.state.forwardProgress.set(peerId, (i + 1) / totalChunks);
+      // Throttle re-renders: emit state every 16 chunks.
+      if (i % 16 === 0) this.emitState();
+    }
+    if (cancelled) return;
+    const end: DataChannelMessage = {
+      type: 'wp-file-end',
+      sessionId: this.state.sessionId!,
+    };
+    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(end));
+    this.state.forwardProgress.set(peerId, 1);
+    this.emitState();
+    this.forwardCancelByPeer.delete(peerId);
+  }
+
+  // -------- Mode C: file-forward receiver side --------
+
+  private handleFileStart(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-start' }>,
+  ): void {
+    if (this.state.role === 'host') return;
+    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
+    // Discovery: we weren't in a session and host just kicked off
+    // forward.
+    this.state = {
+      ...this.state,
+      sessionId: msg.sessionId,
+      role: 'follower',
+      mode: 'forward',
+      hostPeerId: msg.hostPeerId,
+      mediaName: msg.mediaName,
+      mediaDuration: 0,
+      lastTimelineAt: this.localMono(),
+      error: null,
+    };
+    this.receiveBuffers = new Map();
+    this.receiveTotalChunks = msg.totalChunks;
+    this.receiveMimeType = msg.mediaType || 'video/mp4';
+    this.receiveFileName = msg.mediaName;
+    this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, 0);
+    this.emitState();
+    this.startStaleWatchdog();
+  }
+
+  private handleFileChunkMeta(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-chunk-meta' }>,
+  ): void {
+    if (this.state.role !== 'follower' || this.state.mode !== 'forward') return;
+    if (msg.sessionId !== this.state.sessionId) return;
+    let bytes: Uint8Array;
+    try {
+      bytes = base64ToBytes(msg.data);
+    } catch {
+      return;
+    }
+    this.receiveBuffers.set(msg.chunkIndex, bytes);
+    const received = this.receiveBuffers.size;
+    const total = this.receiveTotalChunks || 1;
+    this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, received / total);
+    if (received % WatchPartyService.PROGRESS_ACK_EVERY === 0 || received === total) {
+      this.emitState();
+      // ACK back to host so they can throttle.
+      const ack: DataChannelMessage = {
+        type: 'wp-file-ack',
+        sessionId: this.state.sessionId!,
+        chunkIndex: msg.chunkIndex,
+      };
+      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(ack));
+    }
+  }
+
+  private handleFileEnd(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-end' }>,
+  ): void {
+    void peerId;
+    if (this.state.role !== 'follower' || this.state.mode !== 'forward') return;
+    if (msg.sessionId !== this.state.sessionId) return;
+    // Assemble all chunks into a single Blob in chunk-index order.
+    const total = this.receiveTotalChunks;
+    const parts: BlobPart[] = [];
+    for (let i = 0; i < total; i++) {
+      const part = this.receiveBuffers.get(i);
+      if (!part) {
+        this.surfaceError(`Missing chunk ${i} in transfer; cannot play.`);
+        return;
+      }
+      parts.push(part);
+    }
+    const blob = new Blob(parts, { type: this.receiveMimeType });
+    if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
+    this.receivedBlobUrl = URL.createObjectURL(blob);
+    // Synthesize a File so the existing local-mode UI can pick it up.
+    const file = new File([blob], this.receiveFileName, { type: this.receiveMimeType });
+    this.state = {
+      ...this.state,
+      localFile: file,
+      // Once received, switch internally to 'local' mode for sync; the
+      // timeline algorithm works the same.
+      mode: 'local',
+    };
+    this.receiveBuffers.clear();
+    this.emitState();
+    this.broadcastPeerState();
+  }
+
+  private handleFileAck(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-ack' }>,
+  ): void {
+    if (this.state.role !== 'host') return;
+    if (msg.sessionId !== this.state.sessionId) return;
+    const prev = this.forwardAckedByPeer.get(peerId) ?? -1;
+    if (msg.chunkIndex > prev) {
+      this.forwardAckedByPeer.set(peerId, msg.chunkIndex);
+    }
+  }
+}
+
+// -------- Helpers --------
+
+function bytesToBase64(bytes: Uint8Array): string {
+  // Chunk the conversion so we don't blow the call-stack on big
+  // arrays (String.fromCharCode.apply has an arg-count cap).
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 export const watchPartyService = new WatchPartyService();
