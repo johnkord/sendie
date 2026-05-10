@@ -230,6 +230,12 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
   const [streamTracks, setStreamTracks] = useState(0);
   const [paused, setPaused] = useState(true);
   const [decodeError, setDecodeError] = useState<string | null>(null);
+  // Followers start muted so the drift loop's silent play() call
+  // satisfies browser autoplay policy (muted autoplay is universally
+  // allowed; unmuted requires Media Engagement). User clicks the
+  // unmute button to hear audio. Twitch / YouTube / Disney+ all do
+  // this for live-stream first-load.
+  const [followerMuted, setFollowerMuted] = useState(true);
 
   // Convert the File to an object URL exactly once. Revoke on unmount
   // to free the kernel-side resources.
@@ -378,7 +384,7 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
             // The host can click the speaker icon to unmute for
             // themselves.
             autoPlay={isHost}
-            muted={isHost && state.mode === 'stream'}
+            muted={(isHost && state.mode === 'stream') || (!isHost && followerMuted)}
             className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
           />
           {/* Stream-mode host overlay: shows whenever we don't yet have
@@ -396,30 +402,42 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
               </span>
             </button>
           )}
-          {/* Follower autoplay-fallback overlay: the drift loop calls
-              play() when the host says playing=true, but browsers
-              without prior Media Engagement deny autoplay-with-sound.
-              Surface a click-to-start button rather than failing
-              silently. Disappears as soon as we are no longer paused. */}
+          {/* Follower autoplay-fallback overlay. Two flavors:
+              - If still paused (rare; muted autoplay should succeed),
+                clicking forces play().
+              - If playing but muted, show a small 'click to unmute'
+                affordance in the bottom-right; clicking unmutes via
+                a user gesture. */}
           {!isHost && paused && !decodeError && (
             <button
               onClick={() => {
                 const el = videoRef.current;
                 if (!el) return;
-                el.play().catch(() => {
-                  // Final fallback: try muted (universally allowed) so
-                  // the user at least sees motion; they can unmute later.
-                  el.muted = true;
-                  el.play().catch(() => {});
-                });
+                el.muted = true; // guarantee autoplay allowed
+                setFollowerMuted(true);
+                el.play().catch(() => {});
               }}
               className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-white"
             >
               <span className="text-2xl">▶</span>
               <span className="text-sm font-medium">Click to start watching</span>
               <span className="text-[11px] text-slate-300">
-                Browser blocked autoplay until you click here.
+                Will start muted; tap the speaker icon for audio.
               </span>
+            </button>
+          )}
+          {!isHost && !paused && followerMuted && !decodeError && (
+            <button
+              onClick={() => {
+                const el = videoRef.current;
+                if (!el) return;
+                el.muted = false;
+                setFollowerMuted(false);
+              }}
+              className="absolute bottom-2 right-2 px-3 py-1.5 rounded-full text-xs font-medium bg-black/70 hover:bg-black/90 text-white border border-white/20"
+              title="Unmute"
+            >
+              🔇 Tap to unmute
             </button>
           )}
         </div>
