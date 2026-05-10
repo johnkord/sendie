@@ -1050,7 +1050,23 @@ class WatchPartyService {
     // canMeasure / cooldown gates can't swallow it). The drift loop
     // continues to handle small ongoing drift after the snap.
     const prev = this.lastTimeline;
-    const seekJump = !prev || Math.abs(prev.anchorTime - msg.anchorTime) > 0.25;
+    // Compare incoming anchorTime against where we'd EXPECT it given
+    // the previous timeline plus elapsed wall-clock. Heartbeats advance
+    // anchorTime by the heartbeat interval (~1 s), which is NOT a seek;
+    // a seek is when anchorTime jumps to a value the previous timeline
+    // would not predict. Threshold is generous (1.0 s) so jitter in
+    // the host's anchor sampling doesn't get classified as a seek.
+    const seekJump = !prev || (() => {
+      if (!prev.playing) {
+        // Host was paused. Any anchorTime change is a deliberate seek.
+        return Math.abs(prev.anchorTime - msg.anchorTime) > 0.25;
+      }
+      const prevAnchorMonoLocal = prev.anchorMono - this.hostClockOffset;
+      const msgAnchorMonoLocal = msg.anchorMono - this.hostClockOffset;
+      const dt = msgAnchorMonoLocal - prevAnchorMonoLocal;
+      const expectedAnchorTime = prev.anchorTime + dt * prev.playbackRate;
+      return Math.abs(expectedAnchorTime - msg.anchorTime) > 1.0;
+    })();
     const playFlip = !prev || prev.playing !== msg.playing;
     const rateChange = !prev || prev.playbackRate !== msg.playbackRate;
     const hostChanged = seekJump || playFlip || rateChange;
