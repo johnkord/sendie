@@ -1,14 +1,14 @@
 /**
  * Page-side glue for the watch-party byte-range Service Worker.
  *
- * Receiver only. Manages the SW lifecycle and the postMessage
+ * Receiver only. Manages the SW lifecycle and a MessageChannel
  * roundtrip:
  *
  *  <video src="/wp-stream/<sessionId>">
  *      |
  *      v
  *  Service Worker (public/wp-stream/sw.js)
- *      |  postMessage({ type: 'range-request', requestId, start, end })
+ *      |  port.postMessage({ type: 'range-request', requestId, start, end })
  *      v
  *  This module's `onRangeRequest` callback
  *      |  caller forwards over data channel
@@ -17,9 +17,17 @@
  *      |
  *      v
  *  This module's `deliverRange(requestId, ArrayBuffer)`
- *      |  postMessage({ type: 'range-response', requestId, data }, [data])
+ *      |  port.postMessage({ type: 'range-response', requestId, data }, [data])
  *      v
  *  SW resolves the original fetch with the bytes
+ *
+ * MessageChannel design choice: we can't rely on
+ * `navigator.serviceWorker.controller` because the page (at /) is
+ * outside the SW's scope (/wp-stream/). The SW therefore can't find
+ * us via clients.matchAll either. Solution: the page creates a
+ * MessageChannel, sends one port to the SW with the register-session
+ * message, and uses the other end as a private bidirectional channel
+ * for the lifetime of the watch party.
  */
 
 const SW_URL = '/wp-stream/sw.js';
@@ -28,13 +36,15 @@ const SW_SCOPE = '/wp-stream/';
 class WatchPartyStreamProxy {
   private registrationPromise: Promise<ServiceWorker | null> | null = null;
   private rangeForwarder: ((req: { requestId: number; start: number; end: number }) => void) | null = null;
+  // The MessagePort retained for the active session. SW posts
+  // range-request on it; we post range-response on it.
+  private port: MessagePort | null = null;
 
   /**
-   * Lazily register the SW and resolve once it is the controller of
-   * this page (so postMessage to it actually goes somewhere).
-   *
+   * Lazily register the SW. Returns the active SW (not necessarily
+   * controlling this page; we don't need that for postMessage).
    * Returns null if the browser doesn't support SW or registration
-   * fails. Caller should fall back to the chunked-forward path.
+   * fails.
    */
   async ensureRegistered(): Promise<ServiceWorker | null> {
     if (!('serviceWorker' in navigator)) return null;
@@ -42,18 +52,12 @@ class WatchPartyStreamProxy {
       this.registrationPromise = (async () => {
         try {
           const reg = await navigator.serviceWorker.register(SW_URL, { scope: SW_SCOPE });
-          // Wait for the SW to be active and controlling the page.
-          // Multiple paths to active depending on whether the SW is
-          // brand-new or already installed:
-          //   - reg.active is non-null -> already active.
-          //   - reg.installing / reg.waiting -> wait for state change.
+          // Wait for the SW to be active.
           let sw = reg.active;
           if (!sw) {
             sw = await new Promise<ServiceWorker>((resolve) => {
               const candidate = reg.installing ?? reg.waiting;
               if (!candidate) {
-                // shouldn't happen; resolve null-ish through reg.active
-                // when ready event fires.
                 navigator.serviceWorker.ready.then((r) => resolve(r.active!));
                 return;
               }
@@ -62,32 +66,6 @@ class WatchPartyStreamProxy {
               });
             });
           }
-          // Make sure THIS page is now controlled by the SW. clients.claim()
-          // in the SW handles this on activation, but if we just called
-          // register on a fresh page we still need the controllerchange
-          // event before navigator.serviceWorker.controller becomes set.
-          if (!navigator.serviceWorker.controller) {
-            await new Promise<void>((resolve) => {
-              navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true });
-              // Belt-and-suspenders: poll for a few hundred ms in case
-              // the event already fired.
-              const t = setInterval(() => {
-                if (navigator.serviceWorker.controller) {
-                  clearInterval(t);
-                  resolve();
-                }
-              }, 50);
-              setTimeout(() => { clearInterval(t); resolve(); }, 3000);
-            });
-          }
-          // Wire the page-side message router.
-          navigator.serviceWorker.addEventListener('message', (event) => {
-            const msg = event.data;
-            if (!msg || typeof msg !== 'object') return;
-            if (msg.type === 'range-request' && this.rangeForwarder) {
-              this.rangeForwarder(msg);
-            }
-          });
           return sw;
         } catch (err) {
           console.warn('[wp-stream] SW registration failed:', err);
@@ -113,12 +91,25 @@ class WatchPartyStreamProxy {
     const sw = await this.ensureRegistered();
     if (!sw) return null;
     this.rangeForwarder = opts.onRangeRequest;
+
+    // Set up our private bidirectional channel.
+    const channel = new MessageChannel();
+    this.port = channel.port1;
+    this.port.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'range-request' && this.rangeForwarder) {
+        this.rangeForwarder(msg);
+      }
+      // 'session-registered' confirmation arrives here too; we ignore.
+    };
+    // Send the other port to the SW. transfer = [port2].
     sw.postMessage({
       type: 'register-session',
       sessionId: opts.sessionId,
       mediaSize: opts.mediaSize,
       mediaType: opts.mediaType,
-    });
+    }, [channel.port2]);
     return `/wp-stream/${opts.sessionId}`;
   }
 
@@ -127,20 +118,26 @@ class WatchPartyStreamProxy {
    * Transfers the buffer to the SW (zero-copy where supported).
    */
   deliverRange(requestId: number, data: ArrayBuffer): void {
-    const sw = navigator.serviceWorker?.controller;
-    if (!sw) return;
-    sw.postMessage({ type: 'range-response', requestId, data }, [data]);
+    if (!this.port) return;
+    this.port.postMessage({ type: 'range-response', requestId, data }, [data]);
   }
 
   failRange(requestId: number, error: string): void {
-    const sw = navigator.serviceWorker?.controller;
-    if (!sw) return;
-    sw.postMessage({ type: 'range-error', requestId, error });
+    if (!this.port) return;
+    this.port.postMessage({ type: 'range-error', requestId, error });
   }
 
   endSession(sessionId: string): void {
-    const sw = navigator.serviceWorker?.controller;
-    if (sw) sw.postMessage({ type: 'unregister-session', sessionId });
+    // Tell SW to drop the session and close our port.
+    if (this.port) {
+      try { this.port.close(); } catch { /* ignore */ }
+      this.port = null;
+    }
+    // Best-effort: also notify the SW so it can drop its half.
+    void (async () => {
+      const sw = await this.ensureRegistered();
+      sw?.postMessage({ type: 'unregister-session', sessionId });
+    })();
     this.rangeForwarder = null;
   }
 }

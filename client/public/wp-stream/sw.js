@@ -3,8 +3,7 @@
  *
  * Intercepts fetches for /wp-stream/<sessionId> URLs and translates
  * them into MessageChannel requests to the registered client (the
- * receiver's page). The page handles the actual data-channel
- * roundtrip to the host.
+ * receiver's page).
  *
  * Why a Service Worker? Browsers play normal mp4 / mov / mkv via
  * <video src=URL> with byte-range fetches. By making the SW the
@@ -13,13 +12,17 @@
  * and we sidestep the entire MSE pipeline that gave us trouble.
  *
  * Lifecycle: registered on demand by the page, scope = /wp-stream/.
- * Sessions are registered/unregistered explicitly so SW knows which
- * URLs to claim and which to 404.
+ * The page registers a session via a MessageChannel pair so the SW
+ * can talk to the page even though the page itself is OUT of the
+ * SW's scope (which would otherwise prevent the SW from finding
+ * the page via clients API). The page sends one MessagePort with
+ * the register-session message; SW posts range-requests on it and
+ * receives range-responses on it.
  */
 /* eslint-disable */
-/* global self, clients */
+/* global self */
 
-const VERSION = 'sendie-wp-stream-sw-3';
+const VERSION = 'sendie-wp-stream-sw-4';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -29,7 +32,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
-// sessionId -> { clientId, mediaSize, mediaType }
+// sessionId -> { port, mediaSize, mediaType }
 const sessions = new Map();
 // requestId -> { resolve, reject }
 const pendingRequests = new Map();
@@ -38,37 +41,45 @@ let nextRequestId = 1;
 self.addEventListener('message', (event) => {
   const msg = event.data;
   if (!msg || typeof msg !== 'object') return;
-  switch (msg.type) {
-    case 'register-session':
-      sessions.set(msg.sessionId, {
-        clientId: event.source.id,
-        mediaSize: msg.mediaSize,
-        mediaType: msg.mediaType || 'video/mp4',
-      });
-      event.source.postMessage({ type: 'session-registered', sessionId: msg.sessionId });
-      break;
-    case 'unregister-session':
+  if (msg.type === 'register-session') {
+    const port = event.ports?.[0];
+    if (!port) {
+      console.warn('[wp-stream-sw] register-session missing port');
+      return;
+    }
+    sessions.set(msg.sessionId, {
+      port,
+      mediaSize: msg.mediaSize,
+      mediaType: msg.mediaType || 'video/mp4',
+    });
+    port.onmessage = (e) => {
+      const m = e.data;
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'range-response') {
+        const pending = pendingRequests.get(m.requestId);
+        if (pending) {
+          pendingRequests.delete(m.requestId);
+          pending.resolve(m.data);
+        }
+      } else if (m.type === 'range-error') {
+        const pending = pendingRequests.get(m.requestId);
+        if (pending) {
+          pendingRequests.delete(m.requestId);
+          pending.reject(new Error(m.error || 'range failed'));
+        }
+      }
+    };
+    // Confirm registration via the same port (so caller knows we're ready).
+    port.postMessage({ type: 'session-registered', sessionId: msg.sessionId });
+    console.log('[wp-stream-sw] registered session', msg.sessionId, 'size', msg.mediaSize);
+  } else if (msg.type === 'unregister-session') {
+    const s = sessions.get(msg.sessionId);
+    if (s) {
+      try { s.port.close(); } catch { /* ignore */ }
       sessions.delete(msg.sessionId);
-      break;
-    case 'range-response': {
-      const pending = pendingRequests.get(msg.requestId);
-      if (pending) {
-        pendingRequests.delete(msg.requestId);
-        pending.resolve(msg.data);
-      }
-      break;
     }
-    case 'range-error': {
-      const pending = pendingRequests.get(msg.requestId);
-      if (pending) {
-        pendingRequests.delete(msg.requestId);
-        pending.reject(new Error(msg.error || 'range failed'));
-      }
-      break;
-    }
-    case 'ping':
-      event.source.postMessage({ type: 'pong', version: VERSION });
-      break;
+  } else if (msg.type === 'ping') {
+    event.source?.postMessage?.({ type: 'pong', version: VERSION });
   }
 });
 
@@ -76,12 +87,12 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
   if (!url.pathname.startsWith('/wp-stream/')) return;
-  // /wp-stream/<sessionId>; ignore /wp-stream/sw.js itself.
   const parts = url.pathname.split('/').filter(Boolean);
   const sessionId = parts[1];
   if (!sessionId || sessionId === 'sw.js') return;
   const session = sessions.get(sessionId);
   if (!session) {
+    console.warn('[wp-stream-sw] no session for', sessionId, 'have:', Array.from(sessions.keys()));
     event.respondWith(new Response('No such session', { status: 404 }));
     return;
   }
@@ -110,18 +121,13 @@ self.addEventListener('fetch', (event) => {
 
 async function handleRangeRequest(session, sessionId, start, end, isRange) {
   const requestId = nextRequestId++;
-  const client = await self.clients.get(session.clientId);
-  if (!client) {
-    return new Response('Client gone', { status: 503 });
-  }
-
-  // Ask the page to fetch this range over the data channel.
-  client.postMessage({ type: 'range-request', requestId, sessionId, start, end });
+  console.log('[wp-stream-sw] range', sessionId, start, '-', end, '(req', requestId, ')');
 
   let data;
   try {
     data = await new Promise((resolve, reject) => {
       pendingRequests.set(requestId, { resolve, reject });
+      session.port.postMessage({ type: 'range-request', requestId, sessionId, start, end });
       setTimeout(() => {
         if (pendingRequests.delete(requestId)) {
           reject(new Error('range request timeout (30s)'));
@@ -129,6 +135,7 @@ async function handleRangeRequest(session, sessionId, start, end, isRange) {
       }, 30000);
     });
   } catch (err) {
+    console.warn('[wp-stream-sw] range failed:', err.message);
     return new Response(`Range error: ${err.message}`, { status: 502 });
   }
 
