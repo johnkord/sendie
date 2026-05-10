@@ -316,11 +316,13 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
           // browser's UI; we forward play/pause/seeked via service.
           controls={isHost}
           playsInline
-          // Followers need to attempt unmuted playback to sync audio,
-          // which requires an autoplay-with-sound exception. Browsers
-          // grant this only after a user gesture; the click-to-pick
-          // flow upstream usually counts. If it doesn't, the service
-          // surfaces 'click to enable playback' via state.error.
+          // Auto-start playback for the host. captureStream() yields
+          // an empty MediaStream until the element actually plays, so
+          // followers would see 'connecting...' indefinitely if we
+          // waited for a manual click. The file-pick gesture upstream
+          // grants autoplay-with-sound; if it doesn't, the service
+          // surfaces 'Click the play button' via state.error.
+          autoPlay={isHost}
           className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
         />
       )}

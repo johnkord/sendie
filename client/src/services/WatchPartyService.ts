@@ -381,6 +381,9 @@ class WatchPartyService {
     }
     // captureStream returns a live stream that gets tracks added as the
     // element starts playing. We add them to the mesh as they appear.
+    // Critically: on Chromium captureStream returns an empty MediaStream
+    // until the element actually starts playing, so we MUST kick off
+    // playback or followers will see 'connecting...' forever.
     const stream = capture();
     this.streamCapture = stream;
     this.state = { ...this.state, streamId: stream.id };
@@ -389,20 +392,38 @@ class WatchPartyService {
       if (wired.has(track.id)) return;
       wired.add(track.id);
       multiPeerWebRTCService.addLocalTrack(track, stream);
+      // Re-announce so followers who joined before tracks materialized
+      // can claim the now-flowing tracks; the streamId hasn't changed
+      // but a fresh announcement helps the pending-buffer flow.
+      this.broadcastStreamStart();
     };
     for (const t of stream.getTracks()) wireTrack(t);
     stream.addEventListener('addtrack', (ev) => wireTrack(ev.track));
-    // Set duration when the element knows it.
+    // Set duration when the element knows it, and start playback. The
+    // file-pick click counts as a user gesture so autoplay-with-sound
+    // is granted; if it isn't (e.g. iOS Safari quirks) we surface a
+    // 'click to start' error and the user can hit the native play
+    // button.
     const onLoadedMeta = () => {
       this.state = { ...this.state, mediaDuration: el.duration || 0 };
       this.emitState();
       this.broadcastStreamStart();
+      el.play().catch((err) => {
+        console.warn('Watch party host autoplay blocked:', err);
+        this.surfaceError('Click the play button on your video to start streaming.');
+      });
     };
     el.addEventListener('loadedmetadata', onLoadedMeta);
+    // The video may already have loaded metadata by the time we attach
+    // (loadedmetadata is one-shot and fires before this listener). Kick
+    // playback in that case too.
+    if (el.readyState >= 1 /* HAVE_METADATA */) {
+      onLoadedMeta();
+    }
     this.emitState();
     // Announce now so followers who already have a data channel can
     // match incoming tracks immediately. We may re-announce once
-    // duration is known.
+    // duration is known and once tracks land.
     this.broadcastStreamStart();
     return () => {
       el.removeEventListener('loadedmetadata', onLoadedMeta);
