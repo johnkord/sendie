@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { watchPartyService } from '../services';
+import { watchPartyService, loadResumePoint } from '../services';
 import type { WatchPartyState, WatchPartyPeerInfo } from '../services';
 import { useAppStore } from '../stores/appStore';
 import { formatFileSize } from '../utils/formatters';
@@ -20,14 +20,26 @@ export function WatchPartyPanel() {
     () => new Map(watchPartyService.getPeers()),
   );
   const [open, setOpen] = useState(false);
+  // Late-joiner toast: when a follower's transfer completes while
+  // host is mid-playback, surface a 'Rewind for everyone?' prompt
+  // showing the joiner's friendly name.
+  const [lateJoiner, setLateJoiner] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     watchPartyService.on('onStateChange', (s) => setState({ ...s }));
     watchPartyService.on('onPeersChange', (p) => setPeers(new Map(p)));
+    watchPartyService.on('onPeerCompletedForward', (peerId) => {
+      setLateJoiner(peerId);
+      // Auto-dismiss after 15 s if host doesn't act.
+      window.setTimeout(() => {
+        setLateJoiner((cur) => (cur === peerId ? null : cur));
+      }, 15000);
+    });
     return () => {
       watchPartyService.off('onStateChange');
       watchPartyService.off('onPeersChange');
+      watchPartyService.off('onPeerCompletedForward');
     };
   }, []);
 
@@ -48,11 +60,28 @@ export function WatchPartyPanel() {
     e.target.value = ''; // reset for re-pick
     if (!file) return;
     if (state.role === 'idle') {
+      // Look up a saved resume point. If we have one and the user
+      // confirms, kick off the host with a queued seek-on-ready.
+      let resumeAt: number | null = null;
+      const resume = await loadResumePoint(file);
+      if (resume) {
+        const mm = Math.floor(resume.anchorTime / 60);
+        const ss = Math.floor(resume.anchorTime % 60).toString().padStart(2, '0');
+        const ok = window.confirm(
+          `Resume "${file.name}" at ${mm}:${ss}?\n\nClick Cancel to start from the beginning.`,
+        );
+        if (ok) resumeAt = resume.anchorTime;
+      }
       try {
         await watchPartyService.startAsHost(file, pendingMode);
+        if (resumeAt !== null) {
+          // Queue the seek for once the video has metadata. The
+          // attachVideoElement loadedmetadata handler runs hostSeek
+          // -> which broadcasts. Until then we just remember it.
+          watchPartyService.setPendingHostSeek(resumeAt);
+        }
       } catch (err) {
         console.error('Watch party start failed:', err);
-        // surface to user via state.error path
       }
     } else if (state.role === 'follower') {
       watchPartyService.setFollowerFile(file);
@@ -88,6 +117,11 @@ export function WatchPartyPanel() {
             <p className="text-xs text-red-300/90 bg-red-500/10 border border-red-500/30 rounded p-2">
               {state.error}
             </p>
+          )}
+
+          {/* Late-joiner 'rewind for everyone' toast (host only). */}
+          {lateJoiner && state.role === 'host' && (
+            <LateJoinerToast peerId={lateJoiner} onDismiss={() => setLateJoiner(null)} />
           )}
 
           {/* IDLE state: pick mode then file */}
@@ -682,6 +716,36 @@ interface StreamFollowerProps {
 // Suppress unused warnings; props kept exported for ABI stability while
 // we migrate other code that imports them.
 export type { StreamFollowerProps as _StreamFollowerProps };
+
+function LateJoinerToast({ peerId, onDismiss }: { peerId: string; onDismiss: () => void }) {
+  const peerStore = useAppStore((s) => s.peers);
+  const name = peerStore.get(peerId)?.friendlyName ?? peerId.slice(0, 8);
+  const handleRewind = () => {
+    watchPartyService.hostSeek(0);
+    onDismiss();
+  };
+  return (
+    <div className="flex items-center justify-between gap-2 text-xs rounded border border-purple-500/40 bg-purple-500/10 text-purple-100 p-2">
+      <span>
+        <span className="font-mono">{name}</span> just finished receiving. Rewind so they can watch from the start?
+      </span>
+      <span className="flex gap-1 shrink-0">
+        <button
+          onClick={handleRewind}
+          className="px-2 py-1 rounded font-medium bg-purple-600 hover:bg-purple-700 text-white"
+        >
+          Rewind
+        </button>
+        <button
+          onClick={onDismiss}
+          className="px-2 py-1 rounded text-purple-200 hover:bg-white/5"
+        >
+          Dismiss
+        </button>
+      </span>
+    </div>
+  );
+}
 
 function ForwardReceiverProgress({
   state,

@@ -156,6 +156,11 @@ export type WatchPartyEvents = {
   onStateChange: (state: Readonly<WatchPartyState>) => void;
   onPeersChange: (peers: ReadonlyMap<string, WatchPartyPeerInfo>) => void;
   onError: (err: Error) => void;
+  // Fired on the host when a follower's file transfer completes
+  // (forwardProgress reaches 1). UI listens to offer the host a
+  // 'rewind for everyone' toast for late joiners. peerId identifies
+  // the follower that just finished.
+  onPeerCompletedForward: (peerId: string) => void;
 };
 
 class WatchPartyService {
@@ -216,6 +221,10 @@ class WatchPartyService {
   // and clears its post-seek cooldown when a host action arrives,
   // so explicit user actions are never swallowed by the cooldown.
   private driftSeekCooldownClearedAt = 0;
+  // Queued seek to apply once the host's <video> has loaded
+  // metadata. Used for the F-resume flow where the UI knows the
+  // resume point before the element exists. Cleared on apply.
+  private pendingHostSeek: number | null = null;
 
   // -------- Stream mode (Mode B) state --------
 
@@ -636,10 +645,43 @@ class WatchPartyService {
   }
 
   /**
+   * Queue a seek to apply once the host's video has loaded metadata.
+   * Used by the resume flow: the UI knows the resume point before
+   * the <video> element is bound. Calling this before
+   * attachVideoElement has no effect until metadata loads; calling
+   * after metadata has already loaded applies immediately if there
+   * is a video element.
+   */
+  setPendingHostSeek(seconds: number): void {
+    if (this.state.role !== 'host') return;
+    if (this.videoEl && this.videoEl.readyState >= 1 && this.videoEl.duration > 0) {
+      // Metadata already loaded; apply now.
+      this.hostSeek(seconds);
+      return;
+    }
+    this.pendingHostSeek = seconds;
+  }
+
+  /**
    * Anyone: leave the watch party. Host triggers wp-end so followers
    * tear down too; followers just stop listening.
    */
   leave(): void {
+    // Save resume point before tearing down (host only). Best-effort;
+    // fire-and-forget the async save. The user might pick the same
+    // file again later and we want 'Resume at MM:SS?' to work.
+    if (
+      this.state.role === 'host'
+      && this.state.localFile
+      && this.videoEl
+      && this.videoEl.currentTime > 0
+    ) {
+      void saveResumePoint(
+        this.state.localFile,
+        this.videoEl.currentTime,
+        this.videoEl.duration || 0,
+      );
+    }
     if (this.state.sessionId && this.state.role === 'host') {
       multiPeerWebRTCService.broadcast(JSON.stringify({
         type: 'wp-end',
@@ -688,6 +730,7 @@ class WatchPartyService {
     this.peers.clear();
     this.offsetSamplesByPeer.clear();
     this.lastTimeline = null;
+    this.pendingHostSeek = null;
     this.hostClockOffset = 0;
     this.videoEl = null;
     this.remoteStream = null;
@@ -744,7 +787,16 @@ class WatchPartyService {
       // Forward playback rate changes too (native browser controls
       // expose 0.5x/1x/1.5x/2x menus).
       const onRateChange = () => this.broadcastTimeline({ playbackRate: el.playbackRate });
-      const onLoadedMeta = () => this.setMediaDuration(el.duration || 0);
+      const onLoadedMeta = () => {
+        this.setMediaDuration(el.duration || 0);
+        // Apply a queued resume seek now that we know the duration.
+        if (this.pendingHostSeek !== null && this.pendingHostSeek > 0) {
+          const target = Math.min(this.pendingHostSeek, (el.duration || this.pendingHostSeek) - 1);
+          this.pendingHostSeek = null;
+          try { el.currentTime = target; } catch { /* ignore */ }
+          this.broadcastTimeline();
+        }
+      };
       el.addEventListener('play', onPlay);
       el.addEventListener('pause', onPause);
       el.addEventListener('seeking', onSeeking);
@@ -862,8 +914,27 @@ class WatchPartyService {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    let resumeSaveCounter = 0;
     this.heartbeatTimer = window.setInterval(() => {
       this.broadcastTimeline();
+      // Save resume point every ~10 heartbeats (10 s) while host is
+      // actively playing. Survives tab crash / browser kill that
+      // bypasses leave().
+      resumeSaveCounter++;
+      if (
+        resumeSaveCounter % 10 === 0
+        && this.state.role === 'host'
+        && this.state.localFile
+        && this.videoEl
+        && !this.videoEl.paused
+        && this.videoEl.currentTime > 0
+      ) {
+        void saveResumePoint(
+          this.state.localFile,
+          this.videoEl.currentTime,
+          this.videoEl.duration || 0,
+        );
+      }
     }, TIMELINE_HEARTBEAT_MS);
   }
   private stopHeartbeat(): void {
@@ -1283,6 +1354,15 @@ class WatchPartyService {
     this.state.forwardProgress.set(peerId, 1);
     this.emitState();
     this.forwardCancelByPeer.delete(peerId);
+    // Late-joiner detection: if the host is already playing past
+    // ~5 s when this peer's transfer completed, fire the event so
+    // the UI can offer 'Rewind for everyone'. 5 s threshold avoids
+    // firing for the normal initial-batch fan-out where everyone
+    // finishes near t=0.
+    const hostPos = this.videoEl?.currentTime ?? 0;
+    if (hostPos > 5 && this.videoEl && !this.videoEl.paused) {
+      this.events.onPeerCompletedForward?.(peerId);
+    }
   }
 
   // -------- Mode C: file-forward receiver side --------
@@ -1409,6 +1489,87 @@ function base64ToBytes(b64: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+// -------- Resume helpers (F-resume) --------
+
+// localStorage key prefix for resume entries. We keep the prefix
+// stable so we can sweep stale entries on read.
+const RESUME_KEY_PREFIX = 'sendie:wp-resume:';
+// Drop entries older than this. 30 days matches user expectation
+// of 'I'll come back to this movie later' without growing the
+// store unbounded.
+const RESUME_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Don't bother prompting if the saved position is < 30 s into the
+// movie; user would just play from start anyway.
+const RESUME_MIN_OFFSET_S = 30;
+// Or > duration - 60 s (we're at the credits; just restart).
+const RESUME_END_BUFFER_S = 60;
+
+interface ResumeRecord {
+  mediaName: string;
+  mediaSize: number;
+  anchorTime: number;
+  duration: number;
+  savedAt: number;
+}
+
+async function fileFingerprint(file: File): Promise<string> {
+  // Use SHA-256 of (name + '\u0000' + size) as the key. We don't hash
+  // the bytes (would force a full read of multi-GB files); name+size
+  // disambiguates two unrelated movies that happen to share a name
+  // without paying that cost.
+  const data = new TextEncoder().encode(`${file.name}\u0000${file.size}`);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 32); // 128 bits is plenty
+}
+
+export async function loadResumePoint(file: File): Promise<ResumeRecord | null> {
+  try {
+    const key = RESUME_KEY_PREFIX + (await fileFingerprint(file));
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const rec = JSON.parse(raw) as ResumeRecord;
+    // TTL sweep.
+    if (Date.now() - rec.savedAt > RESUME_TTL_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    // Don't prompt for trivial offsets or near-end positions.
+    if (rec.anchorTime < RESUME_MIN_OFFSET_S) return null;
+    if (rec.duration > 0 && rec.anchorTime > rec.duration - RESUME_END_BUFFER_S) return null;
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
+async function saveResumePoint(file: File, anchorTime: number, duration: number): Promise<void> {
+  try {
+    const key = RESUME_KEY_PREFIX + (await fileFingerprint(file));
+    const rec: ResumeRecord = {
+      mediaName: file.name,
+      mediaSize: file.size,
+      anchorTime,
+      duration,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(key, JSON.stringify(rec));
+  } catch {
+    // localStorage may be full or disabled; silently drop.
+  }
+}
+
+export async function clearResumePoint(file: File): Promise<void> {
+  try {
+    const key = RESUME_KEY_PREFIX + (await fileFingerprint(file));
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
 }
 
 export const watchPartyService = new WatchPartyService();
