@@ -379,6 +379,10 @@ class WatchPartyService {
       this.surfaceError('Streaming not supported in this browser; switch to local-file mode.');
       return () => {};
     }
+    // Mute the local element BEFORE capturing so we hit the
+    // muted-autoplay path unconditionally. Per spec captureStream()
+    // taps audio upstream of the mute stage, so peers still hear it.
+    el.muted = true;
     // captureStream returns a live stream that gets tracks added as the
     // element starts playing. We add them to the mesh as they appear.
     // Critically: on Chromium captureStream returns an empty MediaStream
@@ -408,8 +412,16 @@ class WatchPartyService {
       this.state = { ...this.state, mediaDuration: el.duration || 0 };
       this.emitState();
       this.broadcastStreamStart();
-      el.play().catch((err) => {
-        console.warn('Watch party host autoplay blocked:', err);
+      // Force-mute before play(): unmuted autoplay is blocked on sites
+      // without Media Engagement, which we cannot assume. Muted
+      // autoplay always works. Per spec, captureStream() taps audio
+      // upstream of the element's mute stage so peers still hear it.
+      // The UI surfaces this and lets the host unmute for themselves.
+      el.muted = true;
+      el.play().then(() => {
+        console.log('[watch-party] host play() ok; tracks=', this.streamCapture?.getTracks().length);
+      }).catch((err) => {
+        console.warn('[watch-party] host play() rejected even when muted:', err);
         this.surfaceError('Click the play button on your video to start streaming.');
       });
     };

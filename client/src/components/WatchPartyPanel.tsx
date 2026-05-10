@@ -316,15 +316,27 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
           // browser's UI; we forward play/pause/seeked via service.
           controls={isHost}
           playsInline
-          // Auto-start playback for the host. captureStream() yields
-          // an empty MediaStream until the element actually plays, so
-          // followers would see 'connecting...' indefinitely if we
-          // waited for a manual click. The file-pick gesture upstream
-          // grants autoplay-with-sound; if it doesn't, the service
-          // surfaces 'Click the play button' via state.error.
+          // Critical for stream mode: captureStream() returns an empty
+          // MediaStream until the element actually plays, so followers
+          // would be stuck on 'connecting...' forever if the host's
+          // <video> doesn't auto-start. Browsers only allow unmuted
+          // autoplay if the site has earned Media Engagement, which
+          // we cannot assume on a fresh install. So we autoplay
+          // MUTED. Per spec HTMLMediaElement.captureStream() taps the
+          // decoder output upstream of the element's mute stage, so
+          // peers still hear audio even though the host's local
+          // playback is silent. Host can unmute via the native
+          // controls whenever they want to hear it themselves.
           autoPlay={isHost}
+          muted={isHost && state.mode === 'stream'}
           className="w-full max-h-[60vh] rounded bg-black border border-slate-700"
         />
+      )}
+      {isHost && state.mode === 'stream' && (
+        <p className="text-[11px] text-slate-500">
+          Your video is muted locally so it could start automatically; viewers still hear
+          audio. Click the speaker icon in the player to unmute for yourself.
+        </p>
       )}
 
       {/* Custom seekbar / rate picker for the host, since the service
