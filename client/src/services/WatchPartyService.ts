@@ -1773,8 +1773,14 @@ class WatchPartyService {
       }
       parts.push(part);
     }
-    const blob = new Blob(parts, { type: this.receiveMimeType });
-    const file = new File([blob], this.receiveFileName, { type: this.receiveMimeType });
+    // Strip codec/vendor parameters from the mime for the Blob and
+    // synthesized File. The browser's <video> only needs the base
+    // type ('video/mp4'); the full codec string with mp4box's
+    // 'profiles' extension confuses canPlayType heuristics on some
+    // browsers and isn't useful here.
+    const baseType = (this.receiveMimeType.split(';')[0] || 'video/mp4').trim();
+    const blob = new Blob(parts, { type: baseType });
+    const file = new File([blob], this.receiveFileName, { type: baseType });
     console.log(
       '[watch-party] file-end: assembled', blob.size, 'bytes type=', this.receiveMimeType,
       'mseVerdict=', this.mseStreamableVerdict, 'mseFailed=', this.mseFailed,
@@ -1873,15 +1879,16 @@ const MSE_CODEC_CANDIDATES_WEBM = [
 
 function pickMseCodec(mediaType: string): string | null {
   if (typeof MediaSource === 'undefined') return null;
-  // Prefer the exact mime the host announced if it carries an explicit
-  // codecs= parameter. After our mp4box transmux, the host sends the
-  // composite mime mp4box produced (e.g. 'video/mp4; codecs="avc1.640028,mp4a.40.2"')
-  // which is precisely what addSourceBuffer wants. Guessing from a
-  // hardcoded list misses unusual codec profiles.
-  if (mediaType.includes('codecs=')) {
-    const direct = mediaType.replace(/^\s*([^;]+);\s*/, '$1; ');
+  // mp4box.js's info.mime sometimes includes vendor extensions like
+  // 'video/mp4; codecs="..."; profiles="isom,iso2,avc1,mp41"'.
+  // MediaSource.isTypeSupported is happy with the codecs param but
+  // rejects the trailing 'profiles' (and any other non-standard
+  // attribute), throwing later inside addSourceBuffer. Strip down to
+  // type/subtype + codecs only.
+  const cleaned = sanitizeCodecMime(mediaType);
+  if (cleaned) {
     try {
-      if (MediaSource.isTypeSupported(direct)) return direct;
+      if (MediaSource.isTypeSupported(cleaned)) return cleaned;
     } catch { /* fall through to candidate list */ }
   }
   const candidates = mediaType.includes('webm')
@@ -1891,6 +1898,20 @@ function pickMseCodec(mediaType: string): string | null {
     if (MediaSource.isTypeSupported(c)) return c;
   }
   return null;
+}
+
+/**
+ * Reduce a 'video/mp4; codecs="..."; vendor="..."; ...' mime to just
+ * 'video/mp4; codecs="..."'. Returns null if there is no codecs param
+ * (caller falls back to candidate list).
+ */
+function sanitizeCodecMime(mediaType: string): string | null {
+  const parts = mediaType.split(';').map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  const base = parts[0];
+  const codecs = parts.find((p) => p.startsWith('codecs='));
+  if (!codecs) return null;
+  return `${base}; ${codecs}`;
 }
 
 /**
