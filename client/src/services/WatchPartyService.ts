@@ -56,12 +56,12 @@ const TRANSITION_LOOKAHEAD_S = 0.5;
 //   >= HARD_DRIFT_S       : hard seek (jolts the user, but converges)
 // Plex / Jellyfin / Syncplay use 50 ms / 1 s; we use 100 ms / 1 s so
 // brief voice-traffic blips don't trigger spurious nudges.
-const SOFT_DRIFT_S = 0.1;
+const SOFT_DRIFT_S = 0.5;
 // 0.5 s used to be 1.0 s. With the smoother corrected drift loop
 // (no compounding rate nudge, seek cooldown, no correction during
 // buffering) hard seeks no longer thrash, so we can use them more
 // aggressively and keep receivers within half a second of host.
-const HARD_DRIFT_S = 0.5;
+const HARD_DRIFT_S = 1.5;
 // Maximum rate deviation from host_rate. We scale linearly with
 // drift magnitude so a 100 ms drift gives ~1% nudge while a 400 ms
 // drift gives the full 5%. Constant 5% on every drift size means
@@ -1187,7 +1187,7 @@ class WatchPartyService {
     // and stop nudging entirely.
     let lastRateChangeAt = 0;
     const RATE_THROTTLE_MS = 1000;
-    const DEADBAND_S = 0.05;
+    const DEADBAND_S = 0.5;
     // rVFC support detection. Safari 16.4+, Chrome 83+, Firefox 132+.
     type FrameMeta = { mediaTime: number };
     type RVFCEl = HTMLVideoElement & {
