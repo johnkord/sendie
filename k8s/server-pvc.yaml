@@ -6,7 +6,10 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: azurefile  # Use Azure Files instead of Azure Disk (no volume limit)
+  # deploy.sh patches the dynamically provisioned PV with uid/gid 1654,
+  # file_mode=0660, and dir_mode=0770 before the server mounts it. Azure
+  # Files otherwise exposes every persisted key as 0777.
+  storageClassName: azurefile
   resources:
     requests:
       storage: 100Mi  # Azure Files minimum; billed by actual usage

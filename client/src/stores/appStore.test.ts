@@ -4,23 +4,7 @@ import type { TransferState } from '../types';
 
 describe('appStore', () => {
   beforeEach(() => {
-    // Reset store state before each test
-    useAppStore.setState({
-      connection: {
-        status: 'disconnected',
-        sessionId: null,
-        isInitiator: false,
-        error: null,
-        maxPeers: 10,
-        localFriendlyName: null,
-        isHost: false,
-        hostConnectionId: null,
-        isLocked: false,
-        isHostOnlySending: false,
-      },
-      peers: new Map(),
-      transfers: [],
-    });
+    useAppStore.setState(useAppStore.getInitialState(), true);
   });
 
   describe('connection state', () => {
@@ -156,6 +140,52 @@ describe('appStore', () => {
       expect(connected.length).toBe(1);
       expect(connected[0].peerId).toBe('peer-123');
       expect(connected[0].status).toBe('connected');
+    });
+  });
+
+  describe('file queue state', () => {
+    const oneTimeFile = new File(['one-time'], 'one-time.txt');
+    const broadcastFile = new File(['broadcast'], 'broadcast.txt');
+
+    function addMixedQueue(): void {
+      const store = useAppStore.getState();
+      store.addQueuedFile(oneTimeFile);
+      store.setBroadcastMode(true);
+      store.addQueuedFile(broadcastFile);
+    }
+
+    it('requires explicit receive consent by default', () => {
+      expect(useAppStore.getState().autoReceive).toBe(false);
+    });
+
+    it('clears one-time files without deleting retained broadcast files', () => {
+      addMixedQueue();
+
+      useAppStore.getState().clearOneTimeQueuedFiles();
+
+      const queuedFiles = useAppStore.getState().queuedFiles;
+      expect(queuedFiles).toHaveLength(1);
+      expect(queuedFiles[0].file.name).toBe('broadcast.txt');
+      expect(queuedFiles[0].isBroadcast).toBe(true);
+    });
+
+    it('clears retained broadcast files without deleting one-time files', () => {
+      addMixedQueue();
+
+      useAppStore.getState().clearBroadcastFiles();
+
+      const queuedFiles = useAppStore.getState().queuedFiles;
+      expect(queuedFiles).toHaveLength(1);
+      expect(queuedFiles[0].file.name).toBe('one-time.txt');
+      expect(queuedFiles[0].isBroadcast).toBe(false);
+    });
+
+    it('clears every queued file on room leave', () => {
+      addMixedQueue();
+
+      useAppStore.getState().clearQueuedFiles();
+
+      expect(useAppStore.getState().queuedFiles).toEqual([]);
     });
   });
 

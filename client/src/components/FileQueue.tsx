@@ -6,7 +6,8 @@ interface FileQueueProps {
   queuedFiles: QueuedFile[];
   broadcastMode: boolean;
   onRemoveFile: (id: string) => void;
-  onClearQueue: (broadcastOnly?: boolean) => void;
+  onClearOneTimeFiles: () => void;
+  onClearBroadcastFiles: () => void;
   onToggleBroadcastMode: () => void;
 }
 
@@ -14,7 +15,8 @@ export function FileQueue({
   queuedFiles,
   broadcastMode,
   onRemoveFile,
-  onClearQueue,
+  onClearOneTimeFiles,
+  onClearBroadcastFiles,
   onToggleBroadcastMode,
 }: FileQueueProps) {
   const oneTimeFiles = queuedFiles.filter((f) => !f.isBroadcast);
@@ -24,13 +26,12 @@ export function FileQueue({
   const totalBroadcastSize = broadcastFiles.reduce((acc, f) => acc + f.file.size, 0);
 
   const handleClearOneTime = useCallback(() => {
-    onClearQueue(false);
-  }, [onClearQueue]);
+    onClearOneTimeFiles();
+  }, [onClearOneTimeFiles]);
 
   const handleClearBroadcast = useCallback(() => {
-    // Remove only broadcast files
-    broadcastFiles.forEach((f) => onRemoveFile(f.id));
-  }, [broadcastFiles, onRemoveFile]);
+    onClearBroadcastFiles();
+  }, [onClearBroadcastFiles]);
 
   return (
     <div className="space-y-3">
@@ -42,8 +43,8 @@ export function FileQueue({
             <div className="text-sm font-medium text-slate-200">Broadcast mode</div>
             <p className="text-xs text-slate-500 truncate">
               {broadcastMode
-                ? 'New joiners auto-receive'
-                : 'Send queued files to anyone who joins'}
+                ? 'Offer retained files to future joiners'
+                : 'Do not retain files for later joiners'}
             </p>
           </div>
         </div>
@@ -113,7 +114,7 @@ export function FileQueue({
             </button>
           </div>
           <p className="text-xs text-purple-300/70 mb-2">
-            Sent to everyone who joins.
+            Offered to everyone who joins later.
           </p>
           <div className="space-y-1.5 max-h-48 overflow-y-auto">
             {broadcastFiles.map((qf) => (

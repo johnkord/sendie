@@ -22,7 +22,9 @@ interface AppState {
   autoReceive: boolean;
   addQueuedFile: (file: File) => void;
   removeQueuedFile: (id: string) => void;
-  clearQueuedFiles: (broadcastOnly?: boolean) => void;
+  clearQueuedFiles: () => void;
+  clearOneTimeQueuedFiles: () => void;
+  clearBroadcastFiles: () => void;
   setBroadcastMode: (enabled: boolean) => void;
   setAutoReceive: (enabled: boolean) => void;
   getOneTimeQueuedFiles: () => QueuedFile[];
@@ -130,7 +132,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Default OFF: receivers must explicitly accept incoming files. Prevents
   // anyone with a session URL from silently dropping files into recipients'
   // Downloads folders. The user can opt back into auto-receive per session.
-  autoReceive: true,
+  autoReceive: false,
 
   addQueuedFile: (file: File) =>
     set((state) => ({
@@ -153,11 +155,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       queuedFiles: state.queuedFiles.filter((f) => f.id !== id),
     })),
 
-  clearQueuedFiles: (broadcastOnly?: boolean) =>
+  clearQueuedFiles: () =>
+    set({ queuedFiles: [] }),
+
+  clearOneTimeQueuedFiles: () =>
     set((state) => ({
-      queuedFiles: broadcastOnly 
-        ? state.queuedFiles.filter((f) => !f.isBroadcast)
-        : [],
+      queuedFiles: state.queuedFiles.filter((file) => file.isBroadcast),
+    })),
+
+  clearBroadcastFiles: () =>
+    set((state) => ({
+      queuedFiles: state.queuedFiles.filter((file) => !file.isBroadcast),
     })),
 
   setBroadcastMode: (enabled: boolean) =>

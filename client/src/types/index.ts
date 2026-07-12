@@ -182,6 +182,8 @@ export type DataChannelMessage =
       mediaType: string;  // MIME, e.g. 'video/mp4'; receiver hints <video>
       totalChunks: number;
     }
+  | { type: 'wp-file-accept'; sessionId: string }
+  | { type: 'wp-file-decline'; sessionId: string }
   | {
       type: 'wp-file-chunk-meta';
       sessionId: string;
@@ -204,6 +206,7 @@ export type DataChannelMessage =
       sessionId: string;
       chunkIndex: number;
     }
+  | { type: 'wp-file-ready'; sessionId: string }
   // Host explicitly ends the session for everyone.
   | { type: 'wp-end'; sessionId: string };
 

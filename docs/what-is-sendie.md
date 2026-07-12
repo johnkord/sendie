@@ -25,7 +25,7 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 **What we promise:**
 - ✅ Your files, voice, video, and screen go directly to the other person's browser
 - ✅ We never see or store any of it
-- ✅ Files of any size
+- ✅ No server-imposed file-size limit; the receiver's browser, storage, disk, and connection determine the practical limit
 - ✅ Up to 10 people can join a single session
 - ✅ Hosts can lock sessions and kick peers
 - ✅ Queue files before anyone joins; auto-send on connect
@@ -48,12 +48,12 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 **What we promise:**
 - ✅ **Zero server storage** — files / voice / video / screen / watch-party bytes are never uploaded to us
 - ✅ **End-to-end encryption** — built into WebRTC, not our code to break
-- ✅ **No metadata logging** — we don't know what you're sending, saying, or watching
+- ✅ **No content logging** — file metadata, chat, voice, camera, screen, and watch-party bytes stay off the signaling server
 - ✅ **Verify recipients** — bound SAS codes let you confirm who you're connected to
 
 **What we know about you:**
 - Your Discord username (only if you create a session; joining requires no login)
-- That a session existed (not what was transferred)
+- That a session existed, its connection IDs, membership changes, and host-control events (not what was transferred)
 - IP addresses in server logs (standard web traffic)
 
 **What we don't know:**
@@ -78,7 +78,7 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 | Feature | Limit / notes |
 |---------|---------------|
 | Max peers per session | 10 (configurable) |
-| Max file size | Unlimited (browser/device constrained) |
+| Max file size | No server limit; browser storage, disk, memory, and continuity constrained |
 | Concurrent transfers | Multiple files, multiple peers |
 | Voice chat | Mesh full-duplex; mute toggles per peer |
 | Camera | Mesh, one encoder per receiver on the host |
@@ -90,15 +90,15 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 | Session duration | Until all peers disconnect |
 | Host controls | Lock/unlock session, kick peers, restrict sending |
 | File queue | Queue files before peers join |
-| Broadcast mode | Auto-send to all new joiners |
-| Auto-receive | Default on; can be disabled per user |
+| Retained-file mode | Offer selected queued files to new joiners |
+| Auto-receive | Default off; can be enabled per user |
 | Host-only sending | Restrict file sending to host only |
 
 **Performance notes:**
 - Transfer speed depends on the slowest peer's connection
 - Sender uploads once per recipient (mesh, not relay)
 - Voice / camera / screen share / watch-party stream all run one encoder per peer connection. Large groups (5+) may strain bandwidth and CPU on the sender side
-- TURN relay used only when direct connection fails
+- The included deployment is STUN-only. Operators should configure TURN for restrictive NATs and firewalls
 
 **Tips:**
 - Verify SAS codes for sensitive transfers
@@ -107,7 +107,7 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 - Use a VPN with WebRTC leak protection if you want to hide your IP from peers
 - Use **Broadcast Mode** to distribute files to a group without manually sending each time
 - Queue files before sharing the link for instant transfer when people join
-- Disable **Auto-receive** if you don't want to accept incoming files
+- Leave **Auto-receive** disabled when you want to approve every incoming file
 - Enable **Host-only sending** when distributing files to prevent others from sending
 - For watch parties, H.264/AAC mp4 plays everywhere; Firefox on Linux can't decode H.264 without system codecs (the panel surfaces a banner explaining the workaround)
 
@@ -115,7 +115,7 @@ Sendie is a browser-based peer-to-peer collaboration tool: file transfer, voice 
 
 ## For Developers / Self-Hosters
 
-**What it is:** A .NET 8 + React/TypeScript application using SignalR for WebRTC signaling.
+**What it is:** A .NET 10 + React/TypeScript application using SignalR for WebRTC signaling.
 
 **Architecture:**
 ```
@@ -133,16 +133,15 @@ Client (React/Vite) ←→ SignalR Hub ←→ Client (React/Vite)
 - **P2P:** Native WebRTC with full mesh topology
 
 **Self-hosting requirements:**
-- .NET 8 runtime
-- Node.js 18+ (for building client)
+- .NET 10 runtime
+- Node.js 24+ (for building client)
 - Discord OAuth application
-- STUN/TURN servers (or use public STUN)
+- STUN servers; TURN is strongly recommended for reliable internet connectivity
 - TLS termination (nginx, Traefik, etc.)
 
 **Deployment options:**
-- Docker Compose (simplest)
-- Kubernetes (included manifests for AKS)
-- Any container orchestrator
+- Kubernetes (included manifests target AKS and require customization)
+- Any container orchestrator that can provide TLS, persistent `/app/data`, and WebSocket proxying
 
 **What's not included:**
 - Database (sessions are in-memory)
@@ -225,7 +224,7 @@ Client (React/Vite) ←→ SignalR Hub ←→ Client (React/Vite)
 | Where do my files / voice / video go? | Directly to other peers, never our servers |
 | Is it encrypted? | Yes, DTLS / SRTP (WebRTC standard) |
 | Do I need an account? | Only to create sessions, not to join |
-| File size limit? | None (browser/device limited) |
+| File size limit? | No server-imposed limit; browser storage, disk, memory, and connection limits still apply |
 | How many people? | Up to 10 per session |
 | Voice chat? | Yes, mesh full-duplex |
 | Screen share? | Yes, with optional tab/system audio (Chromium) |
@@ -235,5 +234,5 @@ Client (React/Vite) ←→ SignalR Hub ←→ Client (React/Vite)
 | Does it work on Tor? | No, Tor disables WebRTC |
 | Can I queue files? | Yes, auto-send when someone joins |
 | What is broadcast mode? | Auto-sends queued files to every new joiner |
-| Can I refuse files? | Yes, disable auto-receive |
+| Can I refuse files? | Yes. Per-file approval is the default |
 | Is it open source? | Yes |

@@ -17,13 +17,13 @@ spec:
       labels:
         app: sendie-server
     spec:
-      # Run as the non-root user baked into the image (uid 1001).
+      # Run as the non-root app user built into the Microsoft .NET image.
       # fsGroup ensures the mounted PVC at /app/data is group-writable.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        runAsGroup: 1001
-        fsGroup: 1001
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
       containers:
         - name: sendie-server
           image: ${ACR_LOGIN_SERVER}/sendie-server:${IMAGE_TAG}

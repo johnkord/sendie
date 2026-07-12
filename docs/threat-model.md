@@ -97,7 +97,7 @@ In order from "we'll defend against any audit" to "yeah this part is best-effort
 1. **Mesh CPU caps at 10 peers.** Currently enforced by `AbsoluteMaxPeers`; there is no cryptographic protection if a future change raises it. Adding voice/video would tighten this further (4-peer cap with video).
 2. **No third-party content fetching from the SPA.** CSP `connect-src 'self'` blocks it, but extensions, dev consoles, and people who serve their own build can bypass.
 3. **`robots.txt` blocks indexing of session URLs.** Best-effort; well-behaved bots only. Marvin's polite cousins.
-4. **Container runs as non-root.** Phase 5. UID 1001. PVC permissions are 0700 on the keys subpath.
+4. **Container runs as non-root.** The Microsoft .NET image's built-in `app` user (UID 1654) owns the runtime files. The Azure Files mount is restricted to UID/GID 1654 with directories at 0770 and files at 0660; world access is rejected by the deployment verifier.
 
 ### Things we explicitly do NOT promise
 

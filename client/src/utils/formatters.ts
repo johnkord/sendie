@@ -94,7 +94,7 @@ export function sanitizeFilename(filename: string): string {
     return 'unnamed_file';
   }
 
-  let result = filename
+  const result = filename
     // Remove null bytes
     .replace(/\0/g, '')
     // Remove control characters
@@ -104,13 +104,13 @@ export function sanitizeFilename(filename: string): string {
     // Remove path traversal sequences (must be before separator removal)
     .replace(/\.\./g, '_')
     // Remove directory separators
-    .replace(/[\/\\]/g, '_')
+    .replace(/[/\\]/g, '_')
     // Remove other dangerous characters (Windows + Unix)
-    .replace(/[<>:"\|\?\*]/g, '_')
+    .replace(/[<>:"|?*]/g, '_')
     // Collapse multiple underscores
     .replace(/_+/g, '_')
     // Remove leading/trailing underscores and dots
-    .replace(/^[_\.]+|[_\.]+$/g, '')
+    .replace(/^[_.]+|[_.]+$/g, '')
     // Limit length (255 is common filesystem limit)
     .substring(0, 255);
 

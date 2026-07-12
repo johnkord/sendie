@@ -6,7 +6,7 @@
       "type": "coreclr",
       "request": "launch",
       "preLaunchTask": "build-server",
-      "program": "${workspaceFolder}/server/Sendie.Server/bin/Debug/net8.0/Sendie.Server.dll",
+      "program": "${workspaceFolder}/server/Sendie.Server/bin/Debug/net10.0/Sendie.Server.dll",
       "args": [],
       "cwd": "${workspaceFolder}/server/Sendie.Server",
       "stopAtEntry": false,

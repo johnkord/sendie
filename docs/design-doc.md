@@ -26,12 +26,12 @@ Sendie is a browser-based peer-to-peer collaboration application: file transfer,
 - **End-to-end encryption**: DTLS (data channels) and SRTP (media tracks), both built into WebRTC
 - **Multi-peer mesh**: full mesh topology, up to 10 peers per session
 - **No account required to join**: anonymous, session-based; auth only for session creation
-- **Large file support**: files of any size, limited only by browser/device
-- **NAT traversal**: STUN, falling back to TURN
+- **Large file support**: no server-imposed size limit; practical limits depend on browser storage, disk, memory, and connection continuity
+- **NAT traversal**: STUN-assisted direct connectivity today; TURN is an operator follow-up
 - **Identity verification**: bound SAS code (4-word out-of-band compare) authenticates the encrypted channel itself, defending against an active MITM
 - **File queuing**: queue files before peers join; auto-send on connect
-- **Broadcast mode**: auto-send queued files to every new peer who joins
-- **Receiver control**: per-file accept; auto-receive default-on but toggleable
+- **Retained-file mode**: offer selected queued files to peers who join later
+- **Receiver control**: per-file accept by default; automatic acceptance is opt-in
 - **Real-time A/V**: voice chat, camera sharing, screen sharing (with optional tab/system audio on Chromium)
 - **Watch party**: host picks a video file, bytes ship to every peer over the data channel, then the room watches together with synced play / pause / seek / rate / skip-10s and per-host position resume
 
@@ -129,7 +129,7 @@ For reference, the original 2-peer architecture:
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| **Runtime** | .NET 8 | Modern, performant runtime |
+| **Runtime** | .NET 10 | Current LTS runtime |
 | **Framework** | ASP.NET Core Minimal API | Lightweight HTTP server |
 | **WebSocket** | SignalR | Real-time signaling communication |
 | **Hosting** | Kestrel | High-performance web server |
@@ -498,9 +498,9 @@ public record IceServerConfig(
 │  │    (later)      │     │    sent to B    │    new joiners                 │
 │  └─────────────────┘     └─────────────────┘                               │
 │                                                                             │
-│  AUTO-RECEIVE (receiver-side toggle):                                       │
-│  • Enabled (default): Files automatically accepted and downloaded           │
-│  • Disabled: Incoming file transfers are silently ignored                   │
+│  AUTOMATIC ACCEPT (receiver-side toggle):                                   │
+│  • Disabled (default): Receiver approves each file before chunks are sent   │
+│  • Enabled: Offers from connected, verified peers are accepted automatically │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

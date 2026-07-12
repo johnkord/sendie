@@ -32,7 +32,7 @@ warn()    { yellow "  WARN: $*"; warn_count=$((warn_count+1)); }
 fail()    { red "  FAIL: $*"; fail_count=$((fail_count+1)); }
 
 # ---------------------------------------------------------------------------
-step "1/7  Server tests"
+step "1/8  Server tests"
 # ---------------------------------------------------------------------------
 
 if ! ( cd server/Sendie.Server.Tests && dotnet test --nologo --verbosity quiet 2>&1 | tail -5 ); then
@@ -42,7 +42,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "2/7  Client tests"
+step "2/8  Client tests"
 # ---------------------------------------------------------------------------
 
 if ! ( cd client && npm test -- --run 2>&1 | tail -5 ); then
@@ -52,7 +52,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "3/7  Client production build"
+step "3/8  Client production build"
 # ---------------------------------------------------------------------------
 
 if ! ( cd client && npm run build 2>&1 | tail -8 ); then
@@ -62,7 +62,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "4/7  Hygiene: StreamSaver mitm is pinned to our origin"
+step "4/8  Hygiene: StreamSaver mitm is pinned to our origin"
 # ---------------------------------------------------------------------------
 
 # Phase 4.1: StreamSaver's package source contains a hardcoded default URL
@@ -105,7 +105,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "5/7  Hygiene: secrets template does not configure CookieEncryptionKey"
+step "5/8  Hygiene: secrets template does not configure CookieEncryptionKey"
 # ---------------------------------------------------------------------------
 
 # Phase 0.6: this placeholder was misleading and was removed. If it
@@ -117,7 +117,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "6/7  Hygiene: appsettings.json does not embed Discord secrets"
+step "6/8  Hygiene: appsettings.json does not embed Discord secrets"
 # ---------------------------------------------------------------------------
 
 # Discord client secret should only ever be supplied via the k8s Secret;
@@ -129,7 +129,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "7/7  Hygiene: production AllowedHosts is set"
+step "7/8  Hygiene: production AllowedHosts is set"
 # ---------------------------------------------------------------------------
 
 if [[ -f server/Sendie.Server/appsettings.Production.json ]]; then
@@ -143,6 +143,19 @@ if [[ -f server/Sendie.Server/appsettings.Production.json ]]; then
     fi
 else
     warn "no appsettings.Production.json"
+fi
+
+# ---------------------------------------------------------------------------
+step "8/8  Hygiene: production media permissions allow this origin"
+# ---------------------------------------------------------------------------
+
+if grep -Eq 'camera=\(\)|microphone=\(\)' client/nginx.conf server/Sendie.Server/Program.cs; then
+    fail "Permissions-Policy disables camera or microphone in production"
+elif grep -q 'camera=(self), microphone=(self)' client/nginx.conf \
+    && grep -q 'camera=(self), microphone=(self)' server/Sendie.Server/Program.cs; then
+    ok "camera and microphone are allowed for the Sendie origin"
+else
+    fail "Permissions-Policy does not explicitly allow same-origin camera and microphone"
 fi
 
 # ---------------------------------------------------------------------------

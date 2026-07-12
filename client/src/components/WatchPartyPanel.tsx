@@ -350,6 +350,7 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
     if (followers.length === 0) return false; // no peers yet, wait
     // Use forwardProgress map (set by the service per peer).
     for (const f of followers) {
+      if (state.forwardDeclined.has(f.peerId)) continue;
       const pct = state.forwardProgress.get(f.peerId) ?? 0;
       if (pct < 1) return false;
     }
@@ -548,16 +549,19 @@ function WatchPartyPlayer({ state, peers, onLeave }: PlayerProps) {
                 {Array.from(peers.values())
                   .filter((p) => p.peerId !== state.hostPeerId)
                   .map((p) => {
+                    const declined = state.forwardDeclined.has(p.peerId);
                     const pct = Math.round((state.forwardProgress.get(p.peerId) ?? 0) * 100);
                     return (
                       <div key={p.peerId} className="text-[11px]">
                         <div className="flex justify-between gap-2">
                           <span className="font-mono truncate">{p.peerId.slice(0, 8)}</span>
-                          <span className="tabular-nums">{pct}%</span>
+                          <span className="tabular-nums">{declined ? 'Declined' : `${pct}%`}</span>
                         </div>
-                        <div className="h-1 rounded bg-slate-700 overflow-hidden">
-                          <div className="h-full bg-purple-400 transition-all" style={{ width: `${pct}%` }} />
-                        </div>
+                        {!declined && (
+                          <div className="h-1 rounded bg-slate-700 overflow-hidden">
+                            <div className="h-full bg-purple-400 transition-all" style={{ width: `${pct}%` }} />
+                          </div>
+                        )}
                       </div>
                     );
                   })}

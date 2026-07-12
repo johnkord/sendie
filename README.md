@@ -1,17 +1,18 @@
-# Sendie - P2P File Transfer & Watch Party
+# Sendie - Private P2P Collaboration Rooms
 
-Secure, browser-based peer-to-peer file transfer, voice, screen-share, and synced video watch-parties using WebRTC.
+Private, browser-based rooms for peer-to-peer file transfer, voice, camera,
+screen sharing, chat, and synced local-media watch parties using WebRTC.
 
 ## Features
 
 ### File transfer
 - 🔒 **End-to-end encrypted** — WebRTC DTLS between browsers, with bound SAS-code identity verification (compare 4 words out of band) that defends against an active man-in-the-middle attack on the encrypted channel itself
 - 👥 **Multi-peer mesh** — up to 10 people in a session, full peer-to-peer mesh, no relay
-- 🚀 **No size limit** — files of any size, limited only by browser/device. Large incoming files write directly to disk via the File System Access API or StreamSaver fallback
+- 🚀 **No server-imposed size limit** — practical limits depend on browser storage support, free disk space, memory, and connection continuity. Large incoming files use direct-to-disk or OPFS-backed receive paths when available
 - ⚡ **Direct P2P** — files never touch a server
 - 📋 **File queue** — queue files before peers join; auto-send on connect
-- 📡 **Broadcast mode** — auto-send queued files to every new peer who joins
-- ✅ **Per-file consent** — recipients accept each incoming file by default; auto-receive is opt-in (default on)
+- 📡 **Retained files** — keep selected queued files available to offer to people who join later
+- ✅ **Per-file consent** — recipients explicitly accept incoming files by default; automatic acceptance is an opt-in convenience
 - 👑 **Host controls** — lock the session, kick peers, restrict sending to host only
 
 ### Voice, camera, screen share
@@ -29,7 +30,7 @@ Secure, browser-based peer-to-peer file transfer, voice, screen-share, and synce
 ### Identity & access
 - 🔐 **Allow-listed session creation** — only approved Discord accounts can host sessions
 - 👤 **No account required to join** — recipients just need the session link
-- 🔐 **Bound SAS verification** — the 4-word compare authenticates the encrypted channel, not just the keys
+- 🔐 **Bound SAS verification** — the automatic handshake binds the code to the encrypted channel; comparing the 4 words out of band confirms the person on the other end
 
 > **Note on Privacy vs Anonymity:** Sendie is privacy-focused (we can't see your files, voice, or video) but not anonymous (peers see each other's IPs because P2P requires it). Use a VPN with WebRTC leak protection if you need to hide your IP. Tor Browser won't work; it disables WebRTC. See [docs/what-is-sendie.md](docs/what-is-sendie.md) for the full picture.
 
@@ -37,8 +38,8 @@ Secure, browser-based peer-to-peer file transfer, voice, screen-share, and synce
 
 ### Prerequisites
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- [Node.js 18+](https://nodejs.org/)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- [Node.js 24+](https://nodejs.org/)
 
 ### Setup
 
@@ -104,14 +105,15 @@ Open http://localhost:5173 in your browser.
                                │
                      ┌─────────┴─────────┐
                      │  Signaling Server │
-                     │   (C# / .NET 8)   │
+                     │  (C# / .NET 10)   │
                      └───────────────────┘
 ```
 
 - **Server**: Only handles signaling (session setup, ICE candidates) and Discord OAuth
 - **File data, voice, video, screen, watch-party**: All flow peer-to-peer over WebRTC; never touches the server
 - **Encryption**: DTLS is automatic with WebRTC; bound SAS verification protects the channel itself
-- **Topology**: Full mesh (each peer connects to all others). Practical max ~10 peers; voice / camera / watch-party-stream cap somewhere lower depending on host hardware
+- **Connectivity**: The included deployment currently provides STUN-assisted direct connections only. Configure TURN before promising support for restrictive NATs or firewalls
+- **Topology**: Full mesh (each peer connects to all others). Practical max ~10 peers; live camera and screen sharing cap lower depending on host hardware
 
 ## Project Structure
 
@@ -140,7 +142,7 @@ sendie/
 ## Technology Stack
 
 ### Backend (C#)
-- .NET 8
+- .NET 10
 - ASP.NET Core Minimal API
 - SignalR for WebSocket communication
 

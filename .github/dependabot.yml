@@ -1,0 +1,32 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: weekly
+    groups:
+      client-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      server-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /client
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /server/Sendie.Server
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

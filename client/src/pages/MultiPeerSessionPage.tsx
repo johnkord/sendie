@@ -31,6 +31,7 @@ import {
   Footer 
 } from '../components';
 import type { KeyPair } from '../types';
+import { diffPeerRoster } from '../services/roomReconciliation';
 
 export default function MultiPeerSessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -52,12 +53,16 @@ export default function MultiPeerSessionPage() {
     autoReceive,
     removeQueuedFile,
     clearQueuedFiles,
+    clearOneTimeQueuedFiles,
+    clearBroadcastFiles,
     setBroadcastMode,
     setAutoReceive,
   } = useAppStore();
   
   const keyPairRef = useRef<KeyPair | null>(null);
   const localKeyJwkRef = useRef<string | null>(null);
+  const localConnectionIdRef = useRef<string | null>(null);
+  const roomLifecycleRef = useRef<symbol | null>(null);
   const initializedRef = useRef(false);
   // Track which peers have already received broadcast files
   const peersReceivedBroadcastRef = useRef<Set<string>>(new Set());
@@ -95,8 +100,19 @@ export default function MultiPeerSessionPage() {
       () => useAppStore.getState().connection.isHostOnlySending,
       () => useAppStore.getState().connection.hostConnectionId,
     );
+    watchPartyService.setAcceptIncomingMedia(async (peerId, fileName, fileSize) => {
+      const peer = useAppStore.getState().peers.get(peerId);
+      const friendly = peer?.friendlyName ?? `Peer ${peerId.substring(0, 8)}`;
+      const sizeMb = (fileSize / 1024 / 1024).toFixed(2);
+      return window.confirm(
+        `${friendly} wants to start a watch party with:\n\n`
+        + `  ${fileName} (${sizeMb} MB)\n\n`
+        + `The media will be stored locally in this browser. Click OK to accept.`,
+      );
+    });
     return () => {
       multiPeerFileTransferService.resetAcceptances();
+      watchPartyService.resetAcceptIncomingMedia();
     };
   }, []);
 
@@ -104,22 +120,47 @@ export default function MultiPeerSessionPage() {
   useEffect(() => {
     if (!sessionId || initializedRef.current) return;
     initializedRef.current = true;
+    const roomLifecycle = Symbol(sessionId);
+    roomLifecycleRef.current = roomLifecycle;
+    let disposed = false;
+    const webRtcUnsubscribers: Array<() => void> = [];
+    const trackWebRtcSubscription = (unsubscribe: () => void) => {
+      if (disposed) {
+        unsubscribe();
+      } else {
+        webRtcUnsubscribers.push(unsubscribe);
+      }
+    };
 
     const init = async () => {
       try {
         setConnection({ status: 'connecting', sessionId });
 
         // Generate key pair for identity verification
-        keyPairRef.current = await cryptoService.generateKeyPair();
-        localKeyJwkRef.current = await cryptoService.exportPublicKey(keyPairRef.current.publicKey);
+        const keyPair = await cryptoService.generateKeyPair();
+        if (disposed) return;
+        const localKeyJwk = await cryptoService.exportPublicKey(keyPair.publicKey);
+        if (disposed) return;
 
         // Generate our friendly name from our public key
-        const localFriendlyName = await cryptoService.generateFriendlyName(localKeyJwkRef.current);
+        const localFriendlyName = await cryptoService.generateFriendlyName(localKeyJwk);
+        if (disposed) return;
+        keyPairRef.current = keyPair;
+        localKeyJwkRef.current = localKeyJwk;
         setConnection({ localFriendlyName });
 
         // Initialize services
         await multiPeerWebRTCService.initialize();
+        if (disposed) return;
         await signalingService.connect();
+        if (disposed) {
+          // A newer room lifecycle may now own the shared signaling service.
+          // Disconnect only when no replacement lifecycle exists.
+          if (roomLifecycleRef.current === null) {
+            await signalingService.disconnect();
+          }
+          return;
+        }
 
         // Setup signaling event handlers
         signalingService.on('onPeerJoined', handlePeerJoined);
@@ -136,12 +177,18 @@ export default function MultiPeerSessionPage() {
         signalingService.on('onKicked', handleKicked);
         signalingService.on('onHostOnlySendingEnabled', handleHostOnlySendingEnabled);
         signalingService.on('onHostOnlySendingDisabled', handleHostOnlySendingDisabled);
+        signalingService.on('onHostConnectionChanged', handleHostConnectionChanged);
+        signalingService.on('onReconnecting', handleSignalingReconnecting);
+        signalingService.on('onReconnected', () => {
+          void handleSignalingReconnected(roomLifecycle);
+        });
+        signalingService.on('onClosed', handleSignalingClosed);
 
         // Setup multi-peer WebRTC event handlers
-        multiPeerWebRTCService.on('onPeerConnected', handlePeerConnected);
-        multiPeerWebRTCService.on('onPeerDisconnected', handlePeerDisconnected);
-        multiPeerWebRTCService.on('onDataChannelOpen', handleDataChannelOpen);
-        multiPeerWebRTCService.on('onDataChannelClose', handleDataChannelClose);
+        trackWebRtcSubscription(multiPeerWebRTCService.on('onPeerConnected', handlePeerConnected));
+        trackWebRtcSubscription(multiPeerWebRTCService.on('onPeerDisconnected', handlePeerDisconnected));
+        trackWebRtcSubscription(multiPeerWebRTCService.on('onDataChannelOpen', handleDataChannelOpen));
+        trackWebRtcSubscription(multiPeerWebRTCService.on('onDataChannelClose', handleDataChannelClose));
 
         // Phase 2 verification result handler: peers transition to verified
         // (showing the bound SAS) or failed (channel was closed by the
@@ -205,6 +252,7 @@ export default function MultiPeerSessionPage() {
 
         // Join the session
         const result = await signalingService.joinSession(sessionId, sessionSecretRef.current);
+        if (disposed) return;
         
         if (!result.success) {
           // Check for rate limit error
@@ -235,6 +283,7 @@ export default function MultiPeerSessionPage() {
           isInitiator: result.isInitiator ?? false,
           isHost: result.isHost ?? false,
           hostConnectionId: result.hostConnectionId ?? null,
+          maxPeers: result.maxPeers ?? useAppStore.getState().connection.maxPeers,
           isLocked: result.isLocked ?? false,
           isHostOnlySending: result.isHostOnlySending ?? false,
         });
@@ -244,26 +293,32 @@ export default function MultiPeerSessionPage() {
         // any peer connections are created.
         const localConnId = signalingService.getLocalConnectionId();
         if (localConnId) {
+          localConnectionIdRef.current = localConnId;
           multiPeerWebRTCService.setLocalConnectionId(localConnId);
         }
 
         // PoC: bound-SAS invariant. If a renegotiation arrives with a
         // different DTLS fingerprint, tear down with a destructive warning.
-        multiPeerWebRTCService.on('onFingerprintInvariantViolated', (peerId, expected, got) => {
-          console.error(`MITM detected on ${peerId}: fingerprint changed from ${expected} to ${got}`);
-          updatePeer(peerId, { verification: 'failed', status: 'failed' });
-        });
+        trackWebRtcSubscription(
+          multiPeerWebRTCService.on('onFingerprintInvariantViolated', (peerId, expected, got) => {
+            console.error(`MITM detected on ${peerId}: fingerprint changed from ${expected} to ${got}`);
+            updatePeer(peerId, { verification: 'failed', status: 'failed' });
+          }),
+        );
 
         // If there are existing peers, initiate connections to each
         if (result.existingPeers && result.existingPeers.length > 0) {
           for (const peerId of result.existingPeers) {
+            if (disposed) return;
             console.log('Connecting to existing peer:', peerId);
             addPeer(peerId, { status: 'connecting' });
             await multiPeerWebRTCService.connectToPeer(peerId);
+            if (disposed) return;
           }
           updateConnectionStatus();
         }
       } catch (error) {
+        if (disposed) return;
         console.error('Initialization error:', error);
         
         // Check for rate limit error
@@ -290,6 +345,11 @@ export default function MultiPeerSessionPage() {
 
     return () => {
       // Cleanup
+      disposed = true;
+      initializedRef.current = false;
+      if (roomLifecycleRef.current === roomLifecycle) {
+        roomLifecycleRef.current = null;
+      }
       signalingService.off('onPeerJoined');
       signalingService.off('onPeerLeft');
       signalingService.off('onOffer');
@@ -300,21 +360,29 @@ export default function MultiPeerSessionPage() {
       signalingService.off('onKicked');
       signalingService.off('onHostOnlySendingEnabled');
       signalingService.off('onHostOnlySendingDisabled');
-      multiPeerWebRTCService.off('onPeerConnected');
-      multiPeerWebRTCService.off('onPeerDisconnected');
-      multiPeerWebRTCService.off('onDataChannelOpen');
-      multiPeerWebRTCService.off('onDataChannelClose');
+      signalingService.off('onHostConnectionChanged');
+      signalingService.off('onReconnecting');
+      signalingService.off('onReconnected');
+      signalingService.off('onClosed');
+      for (const unsubscribe of webRtcUnsubscribers) unsubscribe();
       verificationService.off('onVerificationComplete');
+      multiPeerFileTransferService.off('onTransferStart');
+      multiPeerFileTransferService.off('onTransferProgress');
+      multiPeerFileTransferService.off('onTransferComplete');
+      multiPeerFileTransferService.off('onTransferError');
       verificationService.reset();
       voiceService.reset();
       cameraService.reset();
-    screenShareService.reset();
-    watchPartyService.reset();
+      screenShareService.reset();
+      watchPartyService.reset();
       chatService.reset();
       multiPeerWebRTCService.closeAllConnections();
       clearPeers();
       signalingService.disconnect();
     };
+    // This effect owns one room lifetime. Re-running it when callback
+    // identities change would disconnect a healthy room mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // Helper to update overall connection status based on peer states
@@ -404,7 +472,7 @@ export default function MultiPeerSessionPage() {
   // sending before verification finishes results in receiver rejection
   // (Phase 2 enforces verified peers only on the receive path).
   const dispatchPendingFilesToPeer = useCallback(async (peerId: string) => {
-    const { broadcastMode, clearQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } =
+    const { broadcastMode, clearOneTimeQueuedFiles, getBroadcastFiles, getOneTimeQueuedFiles } =
       useAppStore.getState();
 
     // "Is this the first verified peer in this session lifecycle?" If yes,
@@ -424,7 +492,7 @@ export default function MultiPeerSessionPage() {
             console.error('Failed to send queued file:', error);
           }
         }
-        clearQueuedFiles(false);
+        clearOneTimeQueuedFiles();
       }
     }
 
@@ -472,7 +540,7 @@ export default function MultiPeerSessionPage() {
     // verification-complete handler. Sending here would arrive at the
     // receiver before verification finished, and the receiver rejects
     // files from unverified peers (Phase 2). See dispatchPendingFilesToPeer.
-  }, [updatePeer, updateConnectionStatus]);
+  }, [sessionId, updatePeer, updateConnectionStatus]);
 
   const handleDataChannelClose = useCallback((peerId: string) => {
     console.log('Data channel closed with:', peerId);
@@ -512,6 +580,88 @@ export default function MultiPeerSessionPage() {
   const handleHostOnlySendingDisabled = useCallback(() => {
     console.log('Host-only sending disabled');
     setConnection({ isHostOnlySending: false });
+  }, [setConnection]);
+
+  const handleHostConnectionChanged = useCallback((hostConnectionId: string | null) => {
+    setConnection({ hostConnectionId });
+  }, [setConnection]);
+
+  const handleSignalingReconnecting = useCallback((error: Error | null) => {
+    console.warn('Signaling connection interrupted:', error);
+    setConnection({ status: 'connecting', error: null });
+  }, [setConnection]);
+
+  const handleSignalingReconnected = useCallback(async (roomLifecycle: symbol) => {
+    if (!sessionId || roomLifecycleRef.current !== roomLifecycle) return;
+    try {
+      const result = await signalingService.joinSession(sessionId, sessionSecretRef.current);
+      if (roomLifecycleRef.current !== roomLifecycle) return;
+      if (!result.success) {
+        throw new Error(result.error ?? 'The room no longer exists.');
+      }
+
+      const localConnectionId = signalingService.getLocalConnectionId();
+      const connectionIdentityChanged = !!(
+        localConnectionIdRef.current
+        && localConnectionId
+        && localConnectionIdRef.current !== localConnectionId
+      );
+      if (localConnectionId) {
+        localConnectionIdRef.current = localConnectionId;
+        multiPeerWebRTCService.setLocalConnectionId(localConnectionId);
+      }
+      setConnection({
+        status: 'connecting',
+        error: null,
+        isInitiator: result.isInitiator ?? false,
+        isHost: result.isHost ?? false,
+        hostConnectionId: result.hostConnectionId ?? null,
+        maxPeers: result.maxPeers ?? useAppStore.getState().connection.maxPeers,
+        isLocked: result.isLocked ?? false,
+        isHostOnlySending: result.isHostOnlySending ?? false,
+      });
+
+      if (connectionIdentityChanged) {
+        multiPeerWebRTCService.closeAllConnections();
+        verificationService.reset();
+        clearPeers();
+      }
+      const currentPeers = useAppStore.getState().peers;
+      const expectedPeerIds = result.existingPeers ?? [];
+      const roster = diffPeerRoster(currentPeers.keys(), expectedPeerIds);
+      for (const peerId of roster.removed) {
+        multiPeerWebRTCService.closePeerConnection(peerId);
+        verificationService.forget(peerId);
+        removePeer(peerId);
+      }
+      for (const peerId of roster.added) {
+        addPeer(peerId, { status: 'connecting' });
+      }
+      for (const peerId of expectedPeerIds) {
+        if (roomLifecycleRef.current !== roomLifecycle) return;
+        if (!multiPeerWebRTCService.isDataChannelOpen(peerId)) {
+          await multiPeerWebRTCService.connectToPeer(peerId);
+          if (roomLifecycleRef.current !== roomLifecycle) return;
+        }
+      }
+      updateConnectionStatus();
+    } catch (error) {
+      if (roomLifecycleRef.current !== roomLifecycle) return;
+      const message = error instanceof Error ? error.message : 'Could not restore the room.';
+      console.error('Signaling reconnect failed:', error);
+      setConnection({
+        status: 'error',
+        error: `Could not restore this room after reconnecting: ${message}`,
+      });
+    }
+  }, [sessionId, addPeer, removePeer, clearPeers, setConnection, updateConnectionStatus]);
+
+  const handleSignalingClosed = useCallback((error: Error | null) => {
+    console.error('Signaling connection closed:', error);
+    setConnection({
+      status: 'error',
+      error: 'The signaling connection closed. Reload or return home to create a new room.',
+    });
   }, [setConnection]);
 
   // Session Control Actions (Host Only)
@@ -604,8 +754,14 @@ export default function MultiPeerSessionPage() {
     multiPeerFileTransferService.cancelTransfer(fileId);
   }, []);
 
-  const handleLeaveSession = useCallback(() => {
-    signalingService.leaveSession();
+  const handleLeaveSession = useCallback(async () => {
+    try {
+      await signalingService.leaveSession();
+    } catch (error) {
+      // A transient signaling failure should not trap the user in the room;
+      // cleanup below still closes local P2P state deterministically.
+      console.warn('Could not notify the server before leaving:', error);
+    }
     multiPeerWebRTCService.closeAllConnections();
     voiceService.reset();
     cameraService.reset();
@@ -837,7 +993,8 @@ export default function MultiPeerSessionPage() {
                 queuedFiles={queuedFiles}
                 broadcastMode={broadcastMode}
                 onRemoveFile={removeQueuedFile}
-                onClearQueue={clearQueuedFiles}
+                onClearOneTimeFiles={clearOneTimeQueuedFiles}
+                onClearBroadcastFiles={clearBroadcastFiles}
                 onToggleBroadcastMode={handleToggleBroadcastMode}
               />
             )}

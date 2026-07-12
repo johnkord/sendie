@@ -107,21 +107,6 @@ export class MultiPeerWebRTCService {
     };
   }
 
-  /**
-   * Unsubscribe a specific handler. If no handler is provided, removes
-   * all handlers for the event (back-compat with the old single-handler
-   * model).
-   */
-  off<K extends keyof MultiPeerWebRTCEvents>(event: K, handler?: MultiPeerWebRTCEvents[K]): void {
-    const set = this.events[event] as Set<MultiPeerWebRTCEvents[K]> | undefined;
-    if (!set) return;
-    if (handler) {
-      set.delete(handler);
-    } else {
-      set.clear();
-    }
-  }
-
   private emit<K extends keyof MultiPeerWebRTCEvents>(
     event: K,
     ...args: Parameters<MultiPeerWebRTCEvents[K]>
@@ -805,7 +790,7 @@ export class MultiPeerWebRTCService {
    */
   getOpenChannels(): string[] {
     return Array.from(this.peerConnections.entries())
-      .filter(([_, info]) => info.dataChannel?.readyState === 'open')
+      .filter(([, info]) => info.dataChannel?.readyState === 'open')
       .map(([peerId]) => peerId);
   }
 
@@ -814,7 +799,7 @@ export class MultiPeerWebRTCService {
    */
   getConnectedPeers(): string[] {
     return Array.from(this.peerConnections.entries())
-      .filter(([_, info]) => {
+      .filter(([, info]) => {
         const state = info.connection.iceConnectionState;
         return state === 'connected' || state === 'completed';
       })

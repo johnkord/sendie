@@ -1,12 +1,22 @@
 import { multiPeerWebRTCService } from './MultiPeerWebRTCService';
 import { signalingService } from './SignalingService';
 import { cryptoService } from './CryptoService';
+import { verificationService } from './VerificationService';
 import {
   classifyTimelineChange,
   expectedMediaTime,
   type TimelinePoint,
 } from './watchPartySync';
 import type { DataChannelMessage } from '../types';
+import { useAppStore } from '../stores/appStore';
+import { sanitizeFilename } from '../utils/formatters';
+import {
+  WATCH_PARTY_FORWARD_CHUNK_SIZE,
+  WATCH_PARTY_MAX_MEMORY_BYTES,
+  expectedWatchPartyChunkBytes,
+  validateWatchPartyFileChunk,
+  validateWatchPartyFileStart,
+} from './watchPartyTransferPolicy';
 
 /**
  * Synced media playback ("watch party") service.
@@ -98,12 +108,6 @@ export type WatchPartyMode = 'local' | 'forward';
 
 // --- Forward-mode tuning ---
 
-// Chunk size for the in-watch-party file forward. 16 KB is well below
-// the SCTP message ceiling on every browser (Firefox tops out around
-// 256 KB; Chrome 64 KB for some configs). Keep small to minimize
-// head-of-line blocking with chat / timeline messages on the same
-// channel.
-const FORWARD_CHUNK_SIZE = 16 * 1024;
 // Pause sending when local SCTP buffered amount exceeds this many
 // bytes; resume after the channel drains. We poll instead of using
 // the bufferedamountlow event because the file-transfer service
@@ -131,6 +135,9 @@ export interface WatchPartyState {
   // follower. Follower: their own receive progress (single value
   // keyed by hostPeerId in the same map).
   forwardProgress: Map<string, number>;
+  // Peers that declined or could not prepare storage. Hosts treat these
+  // peers as not participating rather than blocking playback forever.
+  forwardDeclined: Set<string>;
   // Optional explicit URL the UI should bind to the <video> element.
   // Set by progressive-playback paths; null in normal forward mode
   // (UI falls back to URL.createObjectURL(localFile)). Currently
@@ -166,6 +173,13 @@ export type WatchPartyEvents = {
   onPeerCompletedForward: (peerId: string) => void;
 };
 
+type AcceptIncomingWatchPartyMedia = (
+  peerId: string,
+  fileName: string,
+  fileSize: number,
+  fileType: string,
+) => Promise<boolean>;
+
 class WatchPartyService {
   private state: WatchPartyState = {
     sessionId: null,
@@ -176,6 +190,7 @@ class WatchPartyService {
     mediaDuration: 0,
     localFile: null,
     forwardProgress: new Map(),
+    forwardDeclined: new Set(),
     playbackUrl: null,
     lastTimelineAt: 0,
     error: null,
@@ -185,6 +200,7 @@ class WatchPartyService {
   // change so the follower UI can see the room ready-state.
   private peers: Map<string, WatchPartyPeerInfo> = new Map();
   private events: Partial<WatchPartyEvents> = {};
+  private acceptIncomingMedia: AcceptIncomingWatchPartyMedia = async () => false;
   // Rolling clock-offset samples per peer. Followers maintain one
   // entry per host (almost always a single host); hosts are
   // bystanders here.
@@ -238,15 +254,33 @@ class WatchPartyService {
   private forwardAckedByPeer: Map<string, number> = new Map();
   // Host: per-peer fan-out cancellers (so leave() can stop them).
   private forwardCancelByPeer: Map<string, () => void> = new Map();
+  // Host: pending receiver decisions. Media chunks are never sent before
+  // the receiver explicitly accepts and prepares a storage target.
+  private forwardDecisionByPeer: Map<
+    string,
+    { sessionId: string; resolve: (accepted: boolean) => void; timeout: number }
+  > = new Map();
 
-  // Follower: incremental receive buffer. Cleared when the file is
-  // assembled into a Blob.
+  // Follower receive state. OPFS is preferred so large media never has to
+  // live in JS memory. The Map is a bounded fallback for browsers where OPFS
+  // is unavailable or blocked.
   private receiveBuffers: Map<number, Uint8Array> = new Map();
+  private receiveOfferPeerId: string | null = null;
+  private receiveOfferSessionId: string | null = null;
+  private receiveFromPeerId: string | null = null;
   private receiveTotalChunks = 0;
+  private receiveExpectedBytes = 0;
+  private receiveBytesWritten = 0;
+  private receiveNextChunk = 0;
   private receiveMimeType = 'video/mp4';
   private receiveFileName = '';
+  private receiveOpfsHandle: FileSystemFileHandle | null = null;
+  private receiveOpfsWritable: FileSystemWritableFileStream | null = null;
+  private receiveOpfsName: string | null = null;
+  private receiveWriteQueue: Promise<void> = Promise.resolve();
   // Follower: Blob URL for the assembled file. Revoked on leave.
   private receivedBlobUrl: string | null = null;
+  private receivedOpfsName: string | null = null;
   // Follower: progress reported back to host every PROGRESS_ACK_EVERY chunks.
   private static readonly PROGRESS_ACK_EVERY = 32;
 
@@ -264,6 +298,11 @@ class WatchPartyService {
     multiPeerWebRTCService.on('onPeerDisconnected', (peerId) => {
       this.peers.delete(peerId);
       this.offsetSamplesByPeer.delete(peerId);
+      this.state.forwardProgress.delete(peerId);
+      this.state.forwardDeclined.delete(peerId);
+      this.resolveForwardDecision(peerId, false);
+      this.forwardCancelByPeer.get(peerId)?.();
+      this.forwardCancelByPeer.delete(peerId);
       // If the host disconnected, stop the session locally and let
       // the user know. We don't auto-promote in v1; the user explicitly
       // takes over via the host-request flow.
@@ -294,6 +333,14 @@ class WatchPartyService {
   }
   off<K extends keyof WatchPartyEvents>(event: K): void {
     delete this.events[event];
+  }
+
+  setAcceptIncomingMedia(handler: AcceptIncomingWatchPartyMedia): void {
+    this.acceptIncomingMedia = handler;
+  }
+
+  resetAcceptIncomingMedia(): void {
+    this.acceptIncomingMedia = async () => false;
   }
 
   getState(): Readonly<WatchPartyState> { return this.state; }
@@ -340,8 +387,16 @@ class WatchPartyService {
     if (this.state.role !== 'idle') {
       throw new Error('Already in a watch party. Leave first.');
     }
-    const sessionId = cryptoService.generateFileId();
+    const openPeers = multiPeerWebRTCService.getOpenChannels();
+    if (openPeers.some((peerId) => !verificationService.isVerified(peerId))) {
+      throw new Error('Wait for every connected peer to finish channel verification.');
+    }
+    const room = useAppStore.getState().connection;
     const myPeerId = this.getMyPeerId();
+    if (room.isHostOnlySending && myPeerId !== room.hostConnectionId) {
+      throw new Error('Only the room host may start a watch party in host-only mode.');
+    }
+    const sessionId = cryptoService.generateFileId();
     this.state = {
       sessionId,
       role: 'host',
@@ -351,6 +406,7 @@ class WatchPartyService {
       mediaDuration: 0, // populated when the video metadata loads
       localFile: file,
       forwardProgress: new Map(),
+      forwardDeclined: new Set(),
       playbackUrl: null,
       lastTimelineAt: this.localMono(),
       error: null,
@@ -495,13 +551,29 @@ class WatchPartyService {
         sessionId: this.state.sessionId,
       } satisfies DataChannelMessage));
     }
+    const incomingPeerId = this.receiveFromPeerId ?? this.receiveOfferPeerId;
+    const incomingSessionId = this.state.sessionId ?? this.receiveOfferSessionId;
+    if (incomingPeerId && incomingSessionId) {
+      this.sendForwardDecline(incomingPeerId, incomingSessionId);
+    }
     // Forward-mode teardown.
     for (const cancel of this.forwardCancelByPeer.values()) cancel();
     this.forwardCancelByPeer.clear();
+    for (const decision of this.forwardDecisionByPeer.values()) {
+      clearTimeout(decision.timeout);
+      decision.resolve(false);
+    }
+    this.forwardDecisionByPeer.clear();
     this.forwardAckedByPeer.clear();
     this.forwardSourceFile = null;
-    this.receiveBuffers.clear();
-    this.receiveTotalChunks = 0;
+    const activeWritable = this.receiveOpfsWritable;
+    const activeOpfsName = this.receiveOpfsName;
+    const receivedOpfsName = this.receivedOpfsName;
+    this.resetIncomingForwardFields();
+    activeWritable?.abort().catch(() => {});
+    void this.discardOpfsEntry(activeOpfsName);
+    void this.discardOpfsEntry(receivedOpfsName);
+    this.receivedOpfsName = null;
     if (this.receivedBlobUrl) {
       URL.revokeObjectURL(this.receivedBlobUrl);
       this.receivedBlobUrl = null;
@@ -518,6 +590,7 @@ class WatchPartyService {
       mediaDuration: 0,
       localFile: null,
       forwardProgress: new Map(),
+      forwardDeclined: new Set(),
       playbackUrl: null,
       lastTimelineAt: 0,
       error: null,
@@ -801,13 +874,23 @@ class WatchPartyService {
   // -------- Internal: incoming messages --------
 
   private handleMessage(peerId: string, msg: DataChannelMessage): void {
+    if (
+      msg.type.startsWith('wp-')
+      && msg.type !== 'wp-file-start'
+      && !verificationService.isVerified(peerId)
+    ) {
+      return;
+    }
     switch (msg.type) {
       case 'wp-timeline': return this.handleTimeline(peerId, msg);
       case 'wp-peer-state': return this.handlePeerState(peerId, msg);
       case 'wp-file-start': return this.handleFileStart(peerId, msg);
+      case 'wp-file-accept': return this.handleFileAccept(peerId, msg);
+      case 'wp-file-decline': return this.handleFileDecline(peerId, msg);
       case 'wp-file-chunk-meta': return this.handleFileChunkMeta(peerId, msg);
       case 'wp-file-end': return this.handleFileEnd(peerId, msg);
       case 'wp-file-ack': return this.handleFileAck(peerId, msg);
+      case 'wp-file-ready': return this.handleFileReady(peerId, msg);
       case 'wp-end': return this.handleEnd(peerId, msg);
       case 'wp-host-request': return this.handleHostRequest(peerId, msg);
       case 'wp-host-grant': return this.handleHostGrant(peerId, msg);
@@ -819,6 +902,14 @@ class WatchPartyService {
     peerId: string,
     msg: Extract<DataChannelMessage, { type: 'wp-timeline' }>,
   ): void {
+    if (msg.hostPeerId !== peerId || !this.peerMayHostWatchParty(peerId)) return;
+    if (
+      this.state.role === 'follower'
+      && this.state.hostPeerId
+      && this.state.hostPeerId !== peerId
+    ) {
+      return;
+    }
     // First-time discovery: we weren't in a session and now someone is
     // hosting one. Move to follower with their session id.
     if (this.state.role === 'idle') {
@@ -890,10 +981,6 @@ class WatchPartyService {
     // Refresh metadata if the host learned the duration.
     if (msg.mediaDuration && msg.mediaDuration !== this.state.mediaDuration) {
       this.state = { ...this.state, mediaDuration: msg.mediaDuration };
-    }
-    if (msg.hostPeerId !== this.state.hostPeerId) {
-      // Host changed; remember the new one.
-      this.state = { ...this.state, hostPeerId: msg.hostPeerId };
     }
     this.state = {
       ...this.state,
@@ -1150,9 +1237,16 @@ class WatchPartyService {
     const file = this.forwardSourceFile;
     if (!file || this.state.role !== 'host') return;
     if (!multiPeerWebRTCService.isDataChannelOpen(peerId)) return;
+    if (!this.peers.has(peerId)) {
+      this.peers.set(peerId, { peerId, state: 'idle' });
+      this.emitPeers();
+    }
     let cancelled = false;
-    this.forwardCancelByPeer.set(peerId, () => { cancelled = true; });
-    const totalChunks = Math.ceil(file.size / FORWARD_CHUNK_SIZE);
+    this.forwardCancelByPeer.set(peerId, () => {
+      cancelled = true;
+      this.resolveForwardDecision(peerId, false);
+    });
+    const totalChunks = Math.ceil(file.size / WATCH_PARTY_FORWARD_CHUNK_SIZE);
     const start: DataChannelMessage = {
       type: 'wp-file-start',
       sessionId: this.state.sessionId!,
@@ -1162,7 +1256,15 @@ class WatchPartyService {
       mediaType: file.type || 'video/mp4',
       totalChunks,
     };
-    multiPeerWebRTCService.sendTo(peerId, JSON.stringify(start));
+    const accepted = await this.offerForwardToPeer(peerId, start);
+    if (!accepted || cancelled) {
+      this.state.forwardProgress.delete(peerId);
+      this.state.forwardDeclined.add(peerId);
+      this.forwardCancelByPeer.delete(peerId);
+      this.emitState();
+      return;
+    }
+    this.state.forwardDeclined.delete(peerId);
     this.forwardAckedByPeer.set(peerId, 0);
     this.state.forwardProgress.set(peerId, 0);
     this.emitState();
@@ -1177,6 +1279,10 @@ class WatchPartyService {
       ) {
         await new Promise((r) => setTimeout(r, 50));
       }
+      if (cancelled) {
+        this.forwardCancelByPeer.delete(peerId);
+        return;
+      }
       // Also wait until receiver hasn't fallen too far behind on
       // ACKs. Lets us drop the chunked send if the receiver has
       // stalled.
@@ -1186,7 +1292,14 @@ class WatchPartyService {
       ) {
         await new Promise((r) => setTimeout(r, 50));
       }
-      const slice = file.slice(i * FORWARD_CHUNK_SIZE, (i + 1) * FORWARD_CHUNK_SIZE);
+      if (cancelled) {
+        this.forwardCancelByPeer.delete(peerId);
+        return;
+      }
+      const slice = file.slice(
+        i * WATCH_PARTY_FORWARD_CHUNK_SIZE,
+        (i + 1) * WATCH_PARTY_FORWARD_CHUNK_SIZE,
+      );
       const buf = await slice.arrayBuffer();
       const b64 = bytesToBase64(new Uint8Array(buf));
       const msg: DataChannelMessage = {
@@ -1197,7 +1310,7 @@ class WatchPartyService {
       };
       multiPeerWebRTCService.sendTo(peerId, JSON.stringify(msg));
       // Approximate progress (host's view) using i+1.
-      this.state.forwardProgress.set(peerId, (i + 1) / totalChunks);
+      this.state.forwardProgress.set(peerId, ((i + 1) / totalChunks) * 0.99);
       // Throttle re-renders: emit state every 16 chunks.
       if (i % 16 === 0) this.emitState();
     }
@@ -1207,16 +1320,71 @@ class WatchPartyService {
       sessionId: this.state.sessionId!,
     };
     multiPeerWebRTCService.sendTo(peerId, JSON.stringify(end));
-    this.state.forwardProgress.set(peerId, 1);
     this.emitState();
     this.forwardCancelByPeer.delete(peerId);
-    // Late-joiner detection: if the host is already playing past
-    // ~5 s when this peer's transfer completed, fire the event so
-    // the UI can offer 'Rewind for everyone'. 5 s threshold avoids
-    // firing for the normal initial-batch fan-out where everyone
-    // finishes near t=0.
-    const hostPos = this.videoEl?.currentTime ?? 0;
-    if (hostPos > 5 && this.videoEl && !this.videoEl.paused) {
+  }
+
+  private offerForwardToPeer(
+    peerId: string,
+    start: Extract<DataChannelMessage, { type: 'wp-file-start' }>,
+  ): Promise<boolean> {
+    this.resolveForwardDecision(peerId, false);
+    return new Promise((resolve) => {
+      const timeout = window.setTimeout(() => {
+        this.resolveForwardDecision(peerId, false);
+      }, 30_000);
+      this.forwardDecisionByPeer.set(peerId, {
+        sessionId: start.sessionId,
+        resolve,
+        timeout,
+      });
+      if (!multiPeerWebRTCService.sendTo(peerId, JSON.stringify(start))) {
+        this.resolveForwardDecision(peerId, false);
+      }
+    });
+  }
+
+  private resolveForwardDecision(peerId: string, accepted: boolean): void {
+    const pending = this.forwardDecisionByPeer.get(peerId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.forwardDecisionByPeer.delete(peerId);
+    pending.resolve(accepted);
+  }
+
+  private handleFileAccept(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-accept' }>,
+  ): void {
+    const pending = this.forwardDecisionByPeer.get(peerId);
+    if (!pending || pending.sessionId !== msg.sessionId) return;
+    this.resolveForwardDecision(peerId, true);
+  }
+
+  private handleFileDecline(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-decline' }>,
+  ): void {
+    if (msg.sessionId !== this.state.sessionId) return;
+    this.resolveForwardDecision(peerId, false);
+    const cancel = this.forwardCancelByPeer.get(peerId);
+    this.forwardCancelByPeer.delete(peerId);
+    cancel?.();
+    this.state.forwardProgress.delete(peerId);
+    this.state.forwardDeclined.add(peerId);
+    this.emitState();
+  }
+
+  private handleFileReady(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-ready' }>,
+  ): void {
+    if (this.state.role !== 'host' || msg.sessionId !== this.state.sessionId) return;
+    this.state.forwardProgress.set(peerId, 1);
+    this.state.forwardDeclined.delete(peerId);
+    this.emitState();
+    const hostPosition = this.videoEl?.currentTime ?? 0;
+    if (hostPosition > 5 && this.videoEl && !this.videoEl.paused) {
       this.events.onPeerCompletedForward?.(peerId);
     }
   }
@@ -1227,32 +1395,106 @@ class WatchPartyService {
     peerId: string,
     msg: Extract<DataChannelMessage, { type: 'wp-file-start' }>,
   ): void {
-    if (this.state.role === 'host') return;
-    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) return;
-    console.log(
-      '[watch-party] file-start: name=', msg.mediaName, 'size=', msg.mediaSize,
-      'type=', msg.mediaType, 'totalChunks=', msg.totalChunks,
-    );
-    // Discovery: we weren't in a session and host just kicked off
-    // forward.
+    void this.acceptFileStart(peerId, msg);
+  }
+
+  private async acceptFileStart(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-start' }>,
+  ): Promise<void> {
+    if (this.state.role === 'host' || this.receiveOfferPeerId || this.receiveFromPeerId) {
+      this.sendForwardDecline(peerId, msg.sessionId);
+      return;
+    }
+    const room = useAppStore.getState().connection;
+    const validationError = validateWatchPartyFileStart(peerId, msg, {
+      peerVerified: verificationService.isVerified(peerId),
+      roomHostOnly: room.isHostOnlySending,
+      roomHostPeerId: room.hostConnectionId,
+      activeWatchPartyHostPeerId:
+        this.state.role === 'follower' ? this.state.hostPeerId : null,
+    });
+    if (validationError) {
+      console.warn(`[watch-party] Declining media from ${peerId}: ${validationError}`);
+      this.sendForwardDecline(peerId, msg.sessionId);
+      return;
+    }
+    if (this.state.sessionId && msg.sessionId !== this.state.sessionId) {
+      this.sendForwardDecline(peerId, msg.sessionId);
+      return;
+    }
+
+    this.receiveOfferPeerId = peerId;
+    this.receiveOfferSessionId = msg.sessionId;
+    const safeFileName = sanitizeFilename(msg.mediaName);
+    let accepted = false;
+    try {
+      accepted = await this.acceptIncomingMedia(
+        peerId,
+        safeFileName,
+        msg.mediaSize,
+        msg.mediaType,
+      );
+    } catch (error) {
+      console.error('[watch-party] Incoming-media prompt failed:', error);
+    }
+    if (this.receiveOfferPeerId !== peerId) return;
+    if (!accepted || !verificationService.isVerified(peerId)) {
+      this.receiveOfferPeerId = null;
+      this.receiveOfferSessionId = null;
+      this.sendForwardDecline(peerId, msg.sessionId);
+      return;
+    }
+
+    try {
+      await this.prepareForwardStorage(msg.mediaSize, msg.sessionId);
+    } catch (error) {
+      this.receiveOfferPeerId = null;
+      this.receiveOfferSessionId = null;
+      const reason = error instanceof Error ? error.message : 'Could not prepare media storage.';
+      this.sendForwardDecline(peerId, msg.sessionId);
+      this.surfaceError(reason);
+      return;
+    }
+    if (this.receiveOfferPeerId !== peerId) {
+      const writable = this.receiveOpfsWritable;
+      const opfsName = this.receiveOpfsName;
+      this.resetIncomingForwardFields();
+      writable?.abort().catch(() => {});
+      void this.discardOpfsEntry(opfsName);
+      return;
+    }
+    this.receiveOfferPeerId = null;
+    this.receiveOfferSessionId = null;
+
+    this.receiveFromPeerId = peerId;
+    this.receiveTotalChunks = msg.totalChunks;
+    this.receiveExpectedBytes = msg.mediaSize;
+    this.receiveBytesWritten = 0;
+    this.receiveNextChunk = 0;
+    this.receiveMimeType = msg.mediaType;
+    this.receiveFileName = safeFileName;
+    this.receiveWriteQueue = Promise.resolve();
     this.state = {
       ...this.state,
       sessionId: msg.sessionId,
       role: 'follower',
       mode: 'forward',
-      hostPeerId: msg.hostPeerId,
-      mediaName: msg.mediaName,
+      hostPeerId: peerId,
+      mediaName: safeFileName,
       mediaDuration: 0,
       lastTimelineAt: this.localMono(),
       error: null,
     };
-    this.receiveBuffers = new Map();
-    this.receiveTotalChunks = msg.totalChunks;
-    this.receiveMimeType = msg.mediaType || 'video/mp4';
-    this.receiveFileName = msg.mediaName;
-    this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, 0);
+    this.state.forwardProgress.set(peerId, 0);
     this.emitState();
     this.startStaleWatchdog();
+    if (!multiPeerWebRTCService.sendTo(peerId, JSON.stringify({
+      type: 'wp-file-accept',
+      sessionId: msg.sessionId,
+    } satisfies DataChannelMessage))) {
+      this.failIncomingForward(peerId, 'The sender disconnected before the transfer began.', false);
+    }
   }
 
   private handleFileChunkMeta(
@@ -1260,71 +1502,245 @@ class WatchPartyService {
     msg: Extract<DataChannelMessage, { type: 'wp-file-chunk-meta' }>,
   ): void {
     if (this.state.role !== 'follower' || this.state.mode !== 'forward') return;
-    if (msg.sessionId !== this.state.sessionId) return;
+    const validationError = validateWatchPartyFileChunk(peerId, msg, {
+      expectedPeerId: this.receiveFromPeerId,
+      expectedSessionId: this.state.sessionId,
+      nextChunkIndex: this.receiveNextChunk,
+      totalChunks: this.receiveTotalChunks,
+    });
+    if (validationError) {
+      this.failIncomingForward(peerId, validationError);
+      return;
+    }
     let bytes: Uint8Array;
     try {
       bytes = base64ToBytes(msg.data);
     } catch {
+      this.failIncomingForward(peerId, 'A media chunk was not valid base64 data.');
       return;
     }
-    this.receiveBuffers.set(msg.chunkIndex, bytes);
-    const received = this.receiveBuffers.size;
-    const total = this.receiveTotalChunks || 1;
-    this.state.forwardProgress.set(this.state.hostPeerId ?? peerId, received / total);
-
-    if (received % WatchPartyService.PROGRESS_ACK_EVERY === 0 || received === total) {
-      this.emitState();
-      const ack: DataChannelMessage = {
-        type: 'wp-file-ack',
-        sessionId: this.state.sessionId!,
-        chunkIndex: msg.chunkIndex,
-      };
-      multiPeerWebRTCService.sendTo(peerId, JSON.stringify(ack));
+    const expectedBytes = expectedWatchPartyChunkBytes(
+      this.receiveExpectedBytes,
+      msg.chunkIndex,
+    );
+    if (bytes.byteLength !== expectedBytes) {
+      this.failIncomingForward(
+        peerId,
+        `Chunk ${msg.chunkIndex} has ${bytes.byteLength} bytes; expected ${expectedBytes}.`,
+      );
+      return;
     }
+    this.receiveNextChunk += 1;
+    this.receiveWriteQueue = this.receiveWriteQueue
+      .then(async () => {
+        if (
+          this.receiveFromPeerId !== peerId
+          || this.state.sessionId !== msg.sessionId
+        ) return;
+        if (this.receiveOpfsWritable) {
+          await this.receiveOpfsWritable.write(bytes);
+        } else {
+          this.receiveBuffers.set(msg.chunkIndex, bytes);
+        }
+        this.receiveBytesWritten += bytes.byteLength;
+        const committed = msg.chunkIndex + 1;
+        this.state.forwardProgress.set(peerId, committed / this.receiveTotalChunks);
+        if (
+          committed % WatchPartyService.PROGRESS_ACK_EVERY === 0
+          || committed === this.receiveTotalChunks
+        ) {
+          this.emitState();
+          multiPeerWebRTCService.sendTo(peerId, JSON.stringify({
+            type: 'wp-file-ack',
+            sessionId: msg.sessionId,
+            chunkIndex: msg.chunkIndex,
+          } satisfies DataChannelMessage));
+        }
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : 'Media storage write failed.';
+        this.failIncomingForward(peerId, message);
+      });
   }
 
   private handleFileEnd(
     peerId: string,
     msg: Extract<DataChannelMessage, { type: 'wp-file-end' }>,
   ): void {
-    void peerId;
-    if (this.state.role !== 'follower' || this.state.mode !== 'forward') return;
-    if (msg.sessionId !== this.state.sessionId) return;
-    // Assemble all chunks into a single Blob in chunk-index order.
-    // We always do this, even if MSE is active, because:
-    //  (a) the user might want to save the file to disk later,
-    //  (b) if MSE failed mid-stream we need to fall back here.
-    const total = this.receiveTotalChunks;
-    const parts: BlobPart[] = [];
-    for (let i = 0; i < total; i++) {
-      const part = this.receiveBuffers.get(i);
-      if (!part) {
-        this.surfaceError(`Missing chunk ${i} in transfer; cannot play.`);
-        return;
-      }
-      parts.push(part);
-    }
-    // Strip codec/vendor parameters from the mime for the Blob and
-    // synthesized File. The browser's <video> only needs the base
-    // type ('video/mp4'); the full codec string would only confuse
-    // canPlayType heuristics.
-    const baseType = (this.receiveMimeType.split(';')[0] || 'video/mp4').trim();
-    const blob = new Blob(parts, { type: baseType });
-    const file = new File([blob], this.receiveFileName, { type: baseType });
+    void this.finishIncomingForward(peerId, msg).catch((error) => {
+      const reason = error instanceof Error ? error.message : 'Could not finalize watch-party media.';
+      this.failIncomingForward(peerId, reason);
+    });
+  }
 
+  private async finishIncomingForward(
+    peerId: string,
+    msg: Extract<DataChannelMessage, { type: 'wp-file-end' }>,
+  ): Promise<void> {
+    if (
+      this.state.role !== 'follower'
+      || this.state.mode !== 'forward'
+      || peerId !== this.receiveFromPeerId
+      || msg.sessionId !== this.state.sessionId
+    ) return;
+    if (this.receiveNextChunk !== this.receiveTotalChunks) {
+      this.failIncomingForward(peerId, 'The sender ended the transfer before every chunk arrived.');
+      return;
+    }
+    await this.receiveWriteQueue;
+    if (peerId !== this.receiveFromPeerId) return;
+    if (this.receiveBytesWritten !== this.receiveExpectedBytes) {
+      this.failIncomingForward(
+        peerId,
+        `Received ${this.receiveBytesWritten} bytes; expected ${this.receiveExpectedBytes}.`,
+      );
+      return;
+    }
+
+    const baseType = (this.receiveMimeType.split(';')[0] || 'video/mp4').trim();
+    let source: Blob;
+    if (this.receiveOpfsWritable && this.receiveOpfsHandle) {
+      await this.receiveOpfsWritable.close();
+      this.receiveOpfsWritable = null;
+      source = await this.receiveOpfsHandle.getFile();
+    } else {
+      const parts: BlobPart[] = [];
+      for (let index = 0; index < this.receiveTotalChunks; index += 1) {
+        const part = this.receiveBuffers.get(index);
+        if (!part) {
+          this.failIncomingForward(peerId, `Missing committed chunk ${index}.`);
+          return;
+        }
+        parts.push(part);
+      }
+      source = new Blob(parts, { type: baseType });
+    }
+
+    const file = new File([source], this.receiveFileName, { type: baseType });
     if (this.receivedBlobUrl) URL.revokeObjectURL(this.receivedBlobUrl);
-    this.receivedBlobUrl = URL.createObjectURL(blob);
+    if (this.receivedOpfsName) void this.discardOpfsEntry(this.receivedOpfsName);
+    this.receivedBlobUrl = URL.createObjectURL(file);
+    this.receivedOpfsName = this.receiveOpfsName;
+    this.resetIncomingForwardFields();
     this.state = {
       ...this.state,
       localFile: file,
       mode: 'local',
-      // Bind playbackUrl directly to the Blob URL. The UI <video>
-      // picks this up on the next render.
       playbackUrl: this.receivedBlobUrl,
+      error: null,
     };
-    this.receiveBuffers.clear();
     this.emitState();
     this.broadcastPeerState();
+    multiPeerWebRTCService.sendTo(peerId, JSON.stringify({
+      type: 'wp-file-ready',
+      sessionId: msg.sessionId,
+    } satisfies DataChannelMessage));
+  }
+
+  private async prepareForwardStorage(mediaSize: number, sessionId: string): Promise<void> {
+    this.receiveBuffers.clear();
+    if (typeof navigator.storage?.getDirectory === 'function') {
+      let root: FileSystemDirectoryHandle | null = null;
+      let opfsName: string | null = null;
+      try {
+        const estimate = await navigator.storage.estimate();
+        const available = (estimate.quota ?? 0) - (estimate.usage ?? 0);
+        if (estimate.quota && available < mediaSize) {
+          throw new Error(
+            `This browser has ${Math.max(0, available)} bytes of site storage available, `
+            + `but the watch-party media needs ${mediaSize} bytes.`,
+          );
+        }
+        if (typeof navigator.storage.persist === 'function') {
+          await navigator.storage.persist().catch(() => false);
+        }
+        root = await navigator.storage.getDirectory();
+        opfsName = `sendie-watch-${sessionId}-${crypto.randomUUID()}`;
+        const handle = await root.getFileHandle(opfsName, { create: true });
+        const writable = await handle.createWritable();
+        this.receiveOpfsHandle = handle;
+        this.receiveOpfsWritable = writable;
+        this.receiveOpfsName = opfsName;
+        return;
+      } catch (error) {
+        if (root && opfsName) {
+          await root.removeEntry(opfsName).catch(() => {});
+        }
+        if (mediaSize > WATCH_PARTY_MAX_MEMORY_BYTES) {
+          const detail = error instanceof Error ? error.message : 'OPFS is unavailable.';
+          throw new Error(
+            `This browser could not prepare disk-backed watch-party storage. ${detail}`,
+          );
+        }
+      }
+    }
+    if (mediaSize > WATCH_PARTY_MAX_MEMORY_BYTES) {
+      throw new Error(
+        `This browser cannot receive watch-party media larger than `
+        + `${WATCH_PARTY_MAX_MEMORY_BYTES} bytes without OPFS.`,
+      );
+    }
+  }
+
+  private failIncomingForward(peerId: string, reason: string, notifySender = true): void {
+    if (peerId !== this.receiveFromPeerId) return;
+    const sessionId = this.state.sessionId;
+    const writable = this.receiveOpfsWritable;
+    const opfsName = this.receiveOpfsName;
+    this.resetIncomingForwardFields();
+    writable?.abort().catch(() => {});
+    void this.discardOpfsEntry(opfsName);
+    if (notifySender && sessionId) this.sendForwardDecline(peerId, sessionId);
+    this.state = {
+      ...this.state,
+      mode: 'local',
+      localFile: null,
+      playbackUrl: null,
+      error: reason,
+    };
+    this.emitState();
+    this.events.onError?.(new Error(reason));
+  }
+
+  private resetIncomingForwardFields(): void {
+    this.receiveOfferPeerId = null;
+    this.receiveOfferSessionId = null;
+    this.receiveFromPeerId = null;
+    this.receiveTotalChunks = 0;
+    this.receiveExpectedBytes = 0;
+    this.receiveBytesWritten = 0;
+    this.receiveNextChunk = 0;
+    this.receiveMimeType = 'video/mp4';
+    this.receiveFileName = '';
+    this.receiveBuffers.clear();
+    this.receiveOpfsHandle = null;
+    this.receiveOpfsWritable = null;
+    this.receiveOpfsName = null;
+    this.receiveWriteQueue = Promise.resolve();
+  }
+
+  private sendForwardDecline(peerId: string, sessionId: string): void {
+    if (sessionId.length === 0 || sessionId.length > 128) return;
+    multiPeerWebRTCService.sendTo(peerId, JSON.stringify({
+      type: 'wp-file-decline',
+      sessionId,
+    } satisfies DataChannelMessage));
+  }
+
+  private async discardOpfsEntry(name: string | null): Promise<void> {
+    if (!name || typeof navigator.storage?.getDirectory !== 'function') return;
+    try {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry(name);
+    } catch {
+      // Best effort. The browser may already have evicted the entry.
+    }
+  }
+
+  private peerMayHostWatchParty(peerId: string): boolean {
+    const room = useAppStore.getState().connection;
+    return !room.isHostOnlySending
+      || (!!room.hostConnectionId && room.hostConnectionId === peerId);
   }
 
   private handleFileAck(

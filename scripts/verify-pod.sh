@@ -23,15 +23,16 @@ warn()  { yellow "  WARN: $*"; }
 echo '----- Pod identity -----'
 uid="$(id -u)"
 gid="$(id -g)"
-if [ "$uid" = "1001" ]; then
-    ok "running as uid 1001 (non-root, Phase 5.1)"
+expected_uid="${APP_UID:-1654}"
+if [ "$uid" = "$expected_uid" ]; then
+    ok "running as built-in app uid $expected_uid (non-root)"
 else
-    fail "running as uid $uid; expected 1001"
+    fail "running as uid $uid; expected built-in APP_UID $expected_uid"
 fi
-if [ "$gid" = "1001" ]; then
-    ok "primary gid is 1001"
+if [ "$gid" = "$expected_uid" ]; then
+    ok "primary gid is $expected_uid"
 else
-    warn "gid is $gid; expected 1001 but fsGroup may have remapped"
+    warn "gid is $gid; expected $expected_uid but fsGroup may have remapped"
 fi
 
 echo '----- Filesystem permissions on Data Protection keys -----'
@@ -39,19 +40,26 @@ keys_dir='/app/data/keys'
 if [ -d "$keys_dir" ]; then
     perms="$(stat -c '%a' "$keys_dir" 2>/dev/null || echo unknown)"
     owner="$(stat -c '%U:%G' "$keys_dir" 2>/dev/null || echo unknown)"
-    # k8s fsGroup re-applies group-writable perms on mount, and existing
-    # PVC contents may be owned by root from a pre-Phase-5 deploy. What
-    # actually matters: appuser can read/write these files. Either owner
-    # or group set to appuser is sufficient given that nothing else runs
-    # in this container.
     case "$owner" in
-        appuser:appuser|1001:1001|*:appuser|*:1001)
-            ok "$keys_dir is accessible to appuser ($owner, mode $perms)"
+        app:app|1654:1654|*:app|*:1654)
+            case "$perms" in
+                700|750|770) ok "$keys_dir is private and app-accessible ($owner, mode $perms)" ;;
+                *) fail "$keys_dir mode is $perms; expected no world access (700, 750, or 770)" ;;
+            esac
             ;;
         *)
-            fail "$keys_dir is not appuser-accessible (owner=$owner, mode=$perms)"
+            fail "$keys_dir is not app-accessible (owner=$owner, mode=$perms)"
             ;;
     esac
+
+    for key_file in "$keys_dir"/*; do
+        [ -e "$key_file" ] || continue
+        perms="$(stat -c '%a' "$key_file" 2>/dev/null || echo unknown)"
+        case "$perms" in
+            600|640|660) ok "$(basename "$key_file") is not world-accessible (mode $perms)" ;;
+            *) fail "$key_file mode is $perms; expected 600, 640, or 660" ;;
+        esac
+    done
 else
     fail "$keys_dir does not exist; Data Protection cannot persist keys"
 fi
@@ -59,12 +67,16 @@ fi
 # allowlist.json: same logic
 if [ -f /app/data/allowlist.json ]; then
     owner="$(stat -c '%U:%G' /app/data/allowlist.json 2>/dev/null || echo unknown)"
+    perms="$(stat -c '%a' /app/data/allowlist.json 2>/dev/null || echo unknown)"
     case "$owner" in
-        appuser:appuser|1001:1001|*:appuser|*:1001)
-            ok "/app/data/allowlist.json accessible to appuser ($owner)"
+        app:app|1654:1654|*:app|*:1654)
+            case "$perms" in
+                600|640|660) ok "/app/data/allowlist.json is private and app-accessible ($owner, mode $perms)" ;;
+                *) fail "/app/data/allowlist.json mode is $perms; expected 600, 640, or 660" ;;
+            esac
             ;;
         *)
-            fail "/app/data/allowlist.json not appuser-accessible (owner=$owner)"
+            fail "/app/data/allowlist.json not app-accessible (owner=$owner)"
             ;;
     esac
 fi

@@ -37,6 +37,18 @@ kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/server-pvc.yaml
 
+# Azure Files defaults dynamically provisioned volumes to file_mode/dir_mode
+# 0777. chmod inside the image cannot change CIFS mount semantics, so patch the
+# bound PV before the server pod mounts it. The server runs as uid/gid 1654.
+SERVER_PV="$(kubectl get pvc sendie-server-data -n sendie -o jsonpath='{.spec.volumeName}')"
+if [ -z "$SERVER_PV" ]; then
+    echo "❌ Error: sendie-server-data is not bound to a persistent volume"
+    exit 1
+fi
+echo "🔒 Hardening Azure Files mount options on $SERVER_PV..."
+kubectl patch pv "$SERVER_PV" --type merge -p \
+    '{"spec":{"mountOptions":["mfsymlinks","actimeo=30","nosharesock","uid=1654","gid=1654","file_mode=0660","dir_mode=0770"]}}'
+
 # Check if secrets.yaml exists (created from template)
 if [ ! -f k8s/secrets.yaml ]; then
     echo "❌ Error: k8s/secrets.yaml not found!"
@@ -58,6 +70,9 @@ kubectl rollout restart deployment/sendie-client -n sendie
 echo "⏳ Waiting for rollout to complete..."
 kubectl rollout status deployment/sendie-server -n sendie
 kubectl rollout status deployment/sendie-client -n sendie
+
+echo "🔍 Verifying server pod hardening..."
+kubectl exec -n sendie deployment/sendie-server -- sh -c "$(cat scripts/verify-pod.sh)"
 
 echo "✅ Deployment complete!"
 echo ""
@@ -86,9 +101,6 @@ else
     echo "   Run manually: ./scripts/smoke.sh https://your-host"
 fi
 
-echo ""
-echo "→ To verify pod hardening (S9 of the remediation plan), run:"
-echo "     kubectl exec -n sendie deployment/sendie-server -- sh -c \"\$(cat scripts/verify-pod.sh)\""
 echo ""
 echo "→ Browser-only smoke tests (S1–S5, S8) MUST be run by hand. See"
 echo "   docs/security-remediation-plan.md §8.2."

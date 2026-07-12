@@ -7,3 +7,6 @@ data:
   # Application URLs
   ASPNETCORE_URLS: "http://+:8080"
   ASPNETCORE_ENVIRONMENT: "Production"
+  # Azure CNI ingress addresses are allocated from the cluster's private
+  # network. Narrow this CIDR if your cluster uses a smaller pod subnet.
+  ReverseProxy__KnownNetworks__0: "10.0.0.0/8"

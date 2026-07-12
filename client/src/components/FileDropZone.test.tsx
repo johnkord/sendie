@@ -108,10 +108,11 @@ describe('FileDropZone', () => {
     expect(mockOnFilesSelected).not.toHaveBeenCalled();
   });
 
-  it('should show no size limit text when enabled', () => {
+  it('should distinguish server limits from browser storage limits', () => {
     render(<FileDropZone onFilesSelected={mockOnFilesSelected} />);
     
     expect(screen.getByText(/Any file type/)).toBeInTheDocument();
-    expect(screen.getByText(/No size limit/)).toBeInTheDocument();
+    expect(screen.getByText(/No server-imposed limit/)).toBeInTheDocument();
+    expect(screen.getByText(/Browser storage applies/)).toBeInTheDocument();
   });
 });

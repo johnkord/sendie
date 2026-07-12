@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.SignalR;
+using Sendie.Server.Models;
 using Sendie.Server.Services;
 
 namespace Sendie.Server.Hubs;
@@ -102,6 +103,7 @@ public class SignalingHub : Hub
 
             // Notify other peers in the session
             await Clients.Group(peer.SessionId).SendAsync("OnPeerLeft", Context.ConnectionId);
+            await BroadcastHostConnectionChanged(peer.SessionId);
 
             _logger.LogInformation("Peer left session {SessionId}: {ConnectionId}", peer.SessionId, Context.ConnectionId);
         }
@@ -132,6 +134,28 @@ public class SignalingHub : Hub
             return new { success = false, error = "Invalid or missing join secret" };
         }
 
+        // Stateful reconnect normally preserves the SignalR connection ID and
+        // group membership. Rejoining is still useful as reconciliation, so
+        // make it idempotent rather than inserting a duplicate peer or
+        // announcing a false new member.
+        var existingMembership = _sessionService.GetPeerByConnectionId(Context.ConnectionId);
+        if (existingMembership?.SessionId == sessionId)
+        {
+            await Groups.AddToGroupAsync(Context.ConnectionId, sessionId);
+            var existingUserId = GetDiscordId();
+            _sessionService.UpdateHostConnectionState(
+                sessionId,
+                Context.ConnectionId,
+                existingUserId,
+                isConnecting: true);
+            await BroadcastHostConnectionChanged(sessionId);
+            return BuildJoinResult(sessionId, existingMembership, existingUserId);
+        }
+        if (existingMembership != null)
+        {
+            return new { success = false, error = "Already joined another session" };
+        }
+
         // Check if session is locked before attempting to join
         if (_sessionService.IsSessionLocked(sessionId))
         {
@@ -158,31 +182,12 @@ public class SignalingHub : Hub
 
         // Notify other peers in the session
         await Clients.OthersInGroup(sessionId).SendAsync("OnPeerJoined", Context.ConnectionId);
+        await BroadcastHostConnectionChanged(sessionId);
 
         _logger.LogInformation("Peer joined session {SessionId}: {ConnectionId} (initiator: {IsInitiator}, userId: {UserId})",
             sessionId, Context.ConnectionId, peer.IsInitiator, userId ?? "anonymous");
 
-        // Return list of existing peers
-        var existingPeers = _sessionService.GetPeersInSession(sessionId)
-            .Where(p => p.ConnectionId != Context.ConnectionId)
-            .Select(p => p.ConnectionId)
-            .ToList();
-
-        // Get session info for the joining peer
-        var session = _sessionService.GetSession(sessionId);
-        var isHost = _sessionService.IsSessionCreator(sessionId, userId);
-        var hostConnectionId = _sessionService.GetHostConnectionId(sessionId);
-
-        return new
-        {
-            success = true,
-            isInitiator = peer.IsInitiator,
-            existingPeers,
-            isHost,
-            hostConnectionId,
-            isLocked = session?.IsLocked ?? false,
-            isHostOnlySending = session?.IsHostOnlySending ?? false
-        };
+        return BuildJoinResult(sessionId, peer, userId);
     }
 
     public async Task LeaveSession()
@@ -199,6 +204,7 @@ public class SignalingHub : Hub
             _sessionService.RemovePeerFromSession(peer.SessionId, Context.ConnectionId);
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, peer.SessionId);
             await Clients.Group(peer.SessionId).SendAsync("OnPeerLeft", Context.ConnectionId);
+            await BroadcastHostConnectionChanged(peer.SessionId);
 
             _logger.LogInformation("Peer left session {SessionId}: {ConnectionId}", peer.SessionId, Context.ConnectionId);
         }
@@ -479,8 +485,37 @@ public class SignalingHub : Hub
 
         // Remove kicked peer from the SignalR group
         await Groups.RemoveFromGroupAsync(targetPeerId, peer.SessionId);
+        await BroadcastHostConnectionChanged(peer.SessionId);
 
         return new { success = true };
+    }
+
+    private object BuildJoinResult(string sessionId, Peer peer, string? userId)
+    {
+        var existingPeers = _sessionService.GetPeersInSession(sessionId)
+            .Where(candidate => candidate.ConnectionId != Context.ConnectionId)
+            .Select(candidate => candidate.ConnectionId)
+            .ToList();
+        var session = _sessionService.GetSession(sessionId);
+
+        return new
+        {
+            success = true,
+            isInitiator = peer.IsInitiator,
+            existingPeers,
+            isHost = _sessionService.IsSessionCreator(sessionId, userId),
+            hostConnectionId = _sessionService.GetHostConnectionId(sessionId),
+            maxPeers = _sessionService.GetMaxPeersForSession(sessionId),
+            isLocked = session?.IsLocked ?? false,
+            isHostOnlySending = session?.IsHostOnlySending ?? false
+        };
+    }
+
+    private Task BroadcastHostConnectionChanged(string sessionId)
+    {
+        return Clients.Group(sessionId).SendAsync(
+            "OnHostConnectionChanged",
+            _sessionService.GetHostConnectionId(sessionId));
     }
 
     /// <summary>

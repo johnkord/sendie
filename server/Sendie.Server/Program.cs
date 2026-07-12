@@ -1,4 +1,5 @@
 using AspNet.Security.OAuth.Discord;
+using System.Net;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
@@ -14,8 +15,30 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    options.KnownNetworks.Clear();
-    options.KnownProxies.Clear();
+    var knownNetworks = builder.Configuration
+        .GetSection("ReverseProxy:KnownNetworks")
+        .Get<string[]>() ?? [];
+    var knownProxies = builder.Configuration
+        .GetSection("ReverseProxy:KnownProxies")
+        .Get<string[]>() ?? [];
+
+    if (knownNetworks.Length > 0 || knownProxies.Length > 0)
+    {
+        options.KnownIPNetworks.Clear();
+        options.KnownProxies.Clear();
+    }
+    foreach (var value in knownNetworks)
+    {
+        if (!System.Net.IPNetwork.TryParse(value, out var network))
+            throw new InvalidOperationException($"Invalid ReverseProxy:KnownNetworks value: {value}");
+        options.KnownIPNetworks.Add(network);
+    }
+    foreach (var value in knownProxies)
+    {
+        if (!IPAddress.TryParse(value, out var proxy))
+            throw new InvalidOperationException($"Invalid ReverseProxy:KnownProxies value: {value}");
+        options.KnownProxies.Add(proxy);
+    }
 });
 
 // Add services
@@ -154,7 +177,7 @@ app.Use(async (context, next) =>
     headers["X-Content-Type-Options"] = "nosniff";
     headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
     headers["X-Frame-Options"] = "DENY";
-    headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), interest-cohort=()";
+    headers["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=(), interest-cohort=()";
     // Defense-in-depth CSP for API and hub responses. Anyone hitting the
     // server directly (port-forward, no nginx) still gets a usable policy.
     // The static client served by nginx has a fuller CSP that mirrors this.
@@ -259,7 +282,7 @@ app.MapPost("/api/sessions", (ISessionService sessionService, IRateLimiterServic
         return Results.StatusCode(429);
     }
 
-    var session = sessionService.CreateSession(discordId, maxPeers ?? 5);
+    var session = sessionService.CreateSession(discordId, maxPeers ?? SessionService.DefaultMaxPeers);
     return Results.Ok(session);
 }).RequireAuthorization("AllowedUser");
 

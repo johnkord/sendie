@@ -190,7 +190,7 @@ Sendie is deployed to Azure Kubernetes Service with the following resources:
 | Namespace | `k8s/namespace.yaml` | `sendie` namespace |
 | ConfigMap | `k8s/configmap.yaml` | Admin IDs, environment settings |
 | Secrets | `k8s/secrets.yaml` | Discord credentials (gitignored) |
-| Server Deployment | `k8s/server-deployment.yaml` | .NET 8 API + SignalR |
+| Server Deployment | `k8s/server-deployment.yaml` | .NET 10 API + SignalR |
 | Client Deployment | `k8s/client-deployment.yaml` | Nginx serving React SPA |
 | Ingress | `k8s/ingress.yaml` | TLS termination, routing |
 
@@ -242,8 +242,8 @@ kubectl apply -f k8s/
 
 ### Prerequisites
 
-- .NET 8 SDK
-- Node.js 18+
+- .NET 10 SDK
+- Node.js 24+
 - Docker (for container builds)
 
 ### Setup
@@ -330,22 +330,23 @@ http://localhost:5000/signin-discord
 - `handleDataChannelOpen` in `MultiPeerSessionPage.tsx` triggers auto-send
 - Tracks which peers received broadcast files to prevent duplicates
 
-### 2025-12-24: Auto-Receive Toggle
+### 2025-12-24: Auto-Receive Toggle (revised 2026-07-11)
 
 **Context**: Some users may not want to automatically receive incoming files (e.g., in untrusted sessions).
 
-**Decision**: Add per-user auto-receive toggle (enabled by default).
+**Decision**: Add a per-user automatic-accept toggle. It now defaults off;
+receivers explicitly approve each incoming file unless they opt in.
 
 **Rationale**:
-- Default behavior (auto-receive ON) maintains simplicity for most users
+- Default behavior prioritizes receiver consent
 - Toggle in session header for quick access
-- When disabled, incoming file transfers are silently ignored (no notification, no pending state)
-- Does not persist across sessions (resets to ON)
+- When disabled, an incoming offer opens an accept/decline prompt before bytes are sent
+- Does not persist across sessions (resets to OFF)
 
 **Implementation**:
 - `autoReceive` state in `appStore.ts`
-- `setAutoReceiveChecker()` on `MultiPeerFileTransferService` 
-- `initializeIncomingTransfer()` checks auto-receive before accepting files
+- `setAcceptIncomingFile()` on `MultiPeerFileTransferService`
+- `initializeIncomingTransfer()` verifies the sender and awaits the receive decision before accepting bytes
 
 ### 2025-12-24: Host-Only Sending Mode
 

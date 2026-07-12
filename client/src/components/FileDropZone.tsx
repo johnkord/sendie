@@ -116,7 +116,9 @@ export function FileDropZone({
               : 'or click to browse'}
           </p>
           {isHero && !disabled && (
-            <p className="mt-2 text-sm text-slate-500">Any file type · No size limit · End-to-end encrypted</p>
+            <p className="mt-2 text-sm text-slate-500">
+              Any file type · No server-imposed limit · Browser storage applies
+            </p>
           )}
         </div>
       </div>

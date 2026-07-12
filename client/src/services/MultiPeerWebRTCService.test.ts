@@ -95,6 +95,38 @@ describe('MultiPeerWebRTCService perfect-negotiation', () => {
     expect(violations).toHaveLength(0);
   });
 
+  it('unsubscribes only the listener that owns the disposer', async () => {
+    multiPeerWebRTCService.setLocalConnectionId('me');
+    const serviceViolations: string[] = [];
+    const pageViolations: string[] = [];
+    const unsubscribeService = multiPeerWebRTCService.on(
+      'onFingerprintInvariantViolated',
+      (peerId) => serviceViolations.push(peerId),
+    );
+    const unsubscribePage = multiPeerWebRTCService.on(
+      'onFingerprintInvariantViolated',
+      (peerId) => pageViolations.push(peerId),
+    );
+
+    const triggerViolation = async (peerId: string) => {
+      multiPeerWebRTCService.createPeerConnection(peerId);
+      await multiPeerWebRTCService.handleOffer(peerId, sdpWithFingerprint(FP_GENUINE));
+      multiPeerWebRTCService.pinRemoteFingerprint(
+        peerId,
+        `sha-256 ${FP_GENUINE.toLowerCase()}`,
+      );
+      await multiPeerWebRTCService.handleOffer(peerId, sdpWithFingerprint(FP_ATTACKER));
+    };
+
+    await triggerViolation('first-room-peer');
+    unsubscribePage();
+    await triggerViolation('second-room-peer');
+    unsubscribeService();
+
+    expect(serviceViolations).toEqual(['first-room-peer', 'second-room-peer']);
+    expect(pageViolations).toEqual(['first-room-peer']);
+  });
+
   it('handleOffer ignores incoming offer when impolite peer is mid-offer (glare)', async () => {
     // 'me' > 'peer-aaa' lexicographically → local is impolite, peer is polite.
     // Wait: lexicographic — 'm' < 'p', so 'me' < 'peer-aaa'.

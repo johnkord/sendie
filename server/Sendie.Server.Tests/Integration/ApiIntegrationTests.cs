@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Sendie.Server.Services;
 
 namespace Sendie.Server.Tests.Integration;
 
@@ -115,6 +116,16 @@ public class ApiIntegrationTests : IClassFixture<TestWebApplicationFactory>
         // Assert
         content.TryGetProperty("createdAt", out _).Should().BeTrue();
         content.TryGetProperty("expiresAt", out _).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CreateSession_ShouldUseServiceDefaultCapacity()
+    {
+        var response = await _client.PostAsync("/api/sessions", null);
+        var content = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        content.GetProperty("maxPeers").GetInt32()
+            .Should().Be(SessionService.DefaultMaxPeers);
     }
 
     [Fact]

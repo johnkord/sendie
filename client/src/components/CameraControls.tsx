@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { cameraService, MAX_VIDEO_PEERS } from '../services';
 
 /**
@@ -25,6 +25,21 @@ export function CameraControls() {
   });
   const previewRef = useRef<HTMLVideoElement | null>(null);
 
+  const refreshDevices = useCallback(async () => {
+    const list = await cameraService.listDevices();
+    setDevices(list);
+    // If the previously selected device is gone (OBS closed, USB cam
+    // unplugged), clear the selection so the next start uses default.
+    if (deviceId && !list.some((device) => device.deviceId === deviceId)) {
+      setDeviceId('');
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    }
+  }, [deviceId]);
+
   useEffect(() => {
     cameraService.on('onStarted', () => {
       setActive(true);
@@ -40,22 +55,7 @@ export function CameraControls() {
       cameraService.off('onStopped');
       cameraService.off('onError');
     };
-  }, []);
-
-  const refreshDevices = async () => {
-    const list = await cameraService.listDevices();
-    setDevices(list);
-    // If the previously selected device is gone (OBS closed, USB cam
-    // unplugged), clear the selection so the next start uses default.
-    if (deviceId && !list.some((d) => d.deviceId === deviceId)) {
-      setDeviceId('');
-      try {
-        localStorage.removeItem(STORAGE_KEY);
-      } catch {
-        // ignore
-      }
-    }
-  };
+  }, [refreshDevices]);
 
   // Initial enumerate + subscribe to devicechange. The first call before
   // permission grant returns labels as empty strings; we re-enumerate
@@ -64,8 +64,7 @@ export function CameraControls() {
     void refreshDevices();
     const unsub = cameraService.onDevicesChanged(() => void refreshDevices());
     return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshDevices]);
 
   // Bind the local stream to the preview <video>. Two iOS Safari
   // gotchas resolved here:

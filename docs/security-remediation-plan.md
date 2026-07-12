@@ -462,24 +462,23 @@ Add `<meta name="referrer" content="strict-origin-when-cross-origin">` to `index
 **File:** [server/Sendie.Server/Dockerfile](../server/Sendie.Server/Dockerfile)
 
 ```dockerfile
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
-RUN adduser --disabled-password --gecos '' --uid 1001 appuser \
- && mkdir -p /app/data/keys \
- && chown -R appuser:appuser /app
-USER appuser
-COPY --from=build --chown=appuser:appuser /app/publish .
+RUN mkdir -p /app/data/keys \
+ && chown -R app:app /app
+USER $APP_UID
+COPY --from=build --chown=app:app /app/publish .
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "Sendie.Server.dll"]
 ```
 
-Verify the PVC mount path is writable by uid 1001 in `k8s/server-deployment.yaml` (`securityContext.fsGroup: 1001`).
+Verify the PVC mount path is writable by UID 1654 in `k8s/server-deployment.yaml` (`securityContext.fsGroup: 1654`). Because Azure Files ignores in-image `chmod` at the mount point, `deploy.sh` also patches the bound PV to `uid=1654,gid=1654,file_mode=0660,dir_mode=0770` before restarting the server.
 
 ### 5.2 Split keys and allow-list onto separate paths (L11)
 
 Two options:
-- Different sub-paths on the same PVC with stricter permissions on `data/keys` (`chmod 700`, owned by `appuser`).
+- Different sub-paths on the same PVC. On Azure Files, mount-level permissions apply to the full share, so the deployed baseline is 0770 for directories and 0660 for files with no world access.
 - Two PVCs.
 
 The first costs nothing and addresses the "give the contractor the allow-list" failure mode by making the keys a separate restorable artifact.
@@ -596,7 +595,7 @@ Per-phase, the minimum:
 | 2 | Unit tests on canonical SAS computation including a fingerprint-mismatch case and a JWK-property-order-difference case; integration test that simulates a server replacing fingerprints and asserts verification fails; timeout test for verification stalled mid-flow |
 | 3 | Concurrent peer-add hammer test (100 threads vs `MaxPeers=5`); allow-list persistence under concurrent admin requests with kill -9 mid-write; rate-limit unit tests for the new policy and per-Discord-ID limit; `IsValidSessionId` boundary tests |
 | 4 | CSP regression check via Playwright + console-error capture; bundle-content check that there is no `jimmywarting.github.io` reference; `robots.txt` served correctly |
-| 5 | Container starts as uid 1001 and can write to `/app/data`; `data/keys` permissions are 0700 |
+| 5 | Container starts as the built-in app UID 1654 and can write to `/app/data`; Azure Files directories are 0770 and files are 0660 with no world access |
 
 Existing tests should not regress. `Sendie.Server.Tests/` has integration scaffolding; reuse it.
 
@@ -694,7 +693,7 @@ For each, use two real browser profiles (or one browser plus an incognito window
    - `Content-Security-Policy: default-src 'self'; ...`
    - `X-Content-Type-Options: nosniff`
    - `Referrer-Policy: strict-origin-when-cross-origin`
-   - `Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()`
+  - `Permissions-Policy: camera=(self), microphone=(self), geolocation=(), interest-cohort=()`
    - `X-Frame-Options: DENY`
 3. Inspect the response to `GET /index.html`. `Cache-Control` should be `no-store`.
 4. Inspect any hashed asset (`/assets/*.js`). `Cache-Control` should include `public, immutable`.
@@ -706,8 +705,8 @@ For each, use two real browser profiles (or one browser plus an incognito window
 3. From DevTools, confirm the cookie's value does not contain a base64-encoded Discord access token (Phase 0.4 / M5). Decode the cookie payload locally if you've kept the Data Protection key.
 
 #### S9: Container security
-1. SSH onto the staging pod. Run `id`. Should return uid=1001, not 0.
-2. `ls -la /app/data/keys`. Permissions should be 700, owner appuser:appuser.
+1. SSH onto the staging pod. Run `id`. Should return uid=1654 (`app`), not 0.
+2. `stat -c '%U:%G %a %n' /app/data/keys /app/data/keys/*`. On Azure Files, the directory should be 770 and key files 660, owned by app:app.
 3. `cat /proc/1/status | grep CapBnd`. Capabilities should be reduced (Phase 5).
 
 #### S10: Open-redirect regression

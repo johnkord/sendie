@@ -155,10 +155,10 @@ export default function HomePage() {
             <span aria-hidden>📤</span> Sendie
           </h1>
           <p className="text-xl text-slate-300">
-            Secure P2P File Transfer
+            Private P2P Collaboration Rooms
           </p>
           <p className="text-slate-500 mt-2">
-            Share files directly between browsers. No upload limits. End-to-end encrypted.
+            Share files and live media directly between browsers with end-to-end encryption.
           </p>
         </div>
 
@@ -249,7 +249,7 @@ export default function HomePage() {
           </div>
           <div className="p-3">
             <div className="text-2xl mb-1" aria-hidden>🚀</div>
-            <p className="text-xs text-slate-400">No size limits</p>
+            <p className="text-xs text-slate-400">No server upload limit</p>
           </div>
           <div className="p-3">
             <div className="text-2xl mb-1" aria-hidden>👥</div>

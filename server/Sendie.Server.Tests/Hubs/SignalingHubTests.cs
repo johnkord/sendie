@@ -65,6 +65,9 @@ public class SignalingHubTests
         _sessionServiceMock
             .Setup(s => s.GetPeersInSession(sessionId))
             .Returns(new List<Peer> { peer });
+        _sessionServiceMock
+            .Setup(s => s.GetMaxPeersForSession(sessionId))
+            .Returns(7);
 
         // Act
         var result = await _hub.JoinSession(sessionId, "correct-secret");
@@ -72,11 +75,14 @@ public class SignalingHubTests
         // Assert
         var successProp = result.GetType().GetProperty("success");
         var isInitiatorProp = result.GetType().GetProperty("isInitiator");
+        var maxPeersProp = result.GetType().GetProperty("maxPeers");
 
         successProp.Should().NotBeNull();
         ((bool)successProp!.GetValue(result)!).Should().BeTrue();
         isInitiatorProp.Should().NotBeNull();
         ((bool)isInitiatorProp!.GetValue(result)!).Should().BeTrue();
+        maxPeersProp.Should().NotBeNull();
+        ((int)maxPeersProp!.GetValue(result)!).Should().Be(7);
     }
 
     [Fact]
@@ -175,6 +181,71 @@ public class SignalingHubTests
                 It.Is<object[]>(o => o[0].ToString() == "test-connection-id"),
                 default),
             Times.Once);
+    }
+
+    [Fact]
+    public async Task JoinSession_ShouldBroadcastAuthoritativeHostConnection()
+    {
+        var sessionId = "abcdefghijklmnopqrstuv";
+        var peer = new Peer("test-connection-id", sessionId, false);
+        _sessionServiceMock.Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>())).Returns(true);
+        _sessionServiceMock
+            .Setup(s => s.AddPeerToSession(sessionId, It.IsAny<string>(), It.IsAny<string?>()))
+            .Returns(peer);
+        _sessionServiceMock.Setup(s => s.GetPeersInSession(sessionId)).Returns([peer]);
+        _sessionServiceMock.Setup(s => s.GetHostConnectionId(sessionId)).Returns("host-connection");
+
+        await _hub.JoinSession(sessionId, "secret");
+
+        _clientProxyMock.Verify(
+            proxy => proxy.SendCoreAsync(
+                "OnHostConnectionChanged",
+                It.Is<object?[]>(args => (string?)args[0] == "host-connection"),
+                default),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task JoinSession_WhenAlreadyMember_ShouldReconcileWithoutDuplicateJoin()
+    {
+        var sessionId = "abcdefghijklmnopqrstuv";
+        var peer = new Peer("test-connection-id", sessionId, true);
+        _sessionServiceMock.Setup(s => s.ValidateSecret(sessionId, It.IsAny<string?>())).Returns(true);
+        _sessionServiceMock.Setup(s => s.GetPeerByConnectionId("test-connection-id")).Returns(peer);
+        _sessionServiceMock.Setup(s => s.GetPeersInSession(sessionId)).Returns([peer]);
+
+        var result = await _hub.JoinSession(sessionId, "secret");
+
+        ((bool)result.GetType().GetProperty("success")!.GetValue(result)!).Should().BeTrue();
+        _sessionServiceMock.Verify(
+            s => s.AddPeerToSession(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()),
+            Times.Never);
+        _othersProxyMock.Verify(
+            proxy => proxy.SendCoreAsync("OnPeerJoined", It.IsAny<object?[]>(), default),
+            Times.Never);
+        _groupsMock.Verify(
+            groups => groups.AddToGroupAsync("test-connection-id", sessionId, default),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task JoinSession_WhenAlreadyInAnotherSession_ShouldRejectWithoutAddingPeer()
+    {
+        var targetSessionId = "abcdefghijklmnopqrstuv";
+        var currentPeer = new Peer("test-connection-id", "different-session", true);
+        _sessionServiceMock
+            .Setup(s => s.ValidateSecret(targetSessionId, It.IsAny<string?>()))
+            .Returns(true);
+        _sessionServiceMock
+            .Setup(s => s.GetPeerByConnectionId("test-connection-id"))
+            .Returns(currentPeer);
+
+        var result = await _hub.JoinSession(targetSessionId, "secret");
+
+        ((bool)result.GetType().GetProperty("success")!.GetValue(result)!).Should().BeFalse();
+        _sessionServiceMock.Verify(
+            s => s.AddPeerToSession(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()),
+            Times.Never);
     }
 
     #endregion

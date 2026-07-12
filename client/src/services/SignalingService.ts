@@ -14,6 +14,10 @@ export type SignalingEvents = {
   onKicked: () => void;
   onHostOnlySendingEnabled: () => void;
   onHostOnlySendingDisabled: () => void;
+  onHostConnectionChanged: (hostConnectionId: string | null) => void;
+  onReconnecting: (error: Error | null) => void;
+  onReconnected: (connectionId: string | null) => void;
+  onClosed: (error: Error | null) => void;
 };
 
 export class SignalingService {
@@ -25,7 +29,7 @@ export class SignalingService {
       return;
     }
 
-    this.connection = new signalR.HubConnectionBuilder()
+    const connection = new signalR.HubConnectionBuilder()
       .withUrl('/hubs/signaling')
       .withAutomaticReconnect([0, 1000, 5000, 10000, 30000]) // Retry pattern for long-lived sessions
       .withStatefulReconnect()  // Enable stateful reconnect for seamless recovery
@@ -33,65 +37,108 @@ export class SignalingService {
       .withKeepAliveInterval(15000)  // 15 seconds keep-alive (matches server config)
       .configureLogging(signalR.LogLevel.Information)
       .build();
+    this.connection = connection;
+    const isCurrentConnection = () => this.connection === connection;
 
     // Register event handlers
-    this.connection.on('OnPeerJoined', (peerId: string) => {
+    connection.on('OnPeerJoined', (peerId: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onPeerJoined?.(peerId);
     });
 
-    this.connection.on('OnPeerLeft', (peerId: string) => {
+    connection.on('OnPeerLeft', (peerId: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onPeerLeft?.(peerId);
     });
 
-    this.connection.on('OnOffer', (peerId: string, sdp: string) => {
+    connection.on('OnOffer', (peerId: string, sdp: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onOffer?.(peerId, sdp);
     });
 
-    this.connection.on('OnAnswer', (peerId: string, sdp: string) => {
+    connection.on('OnAnswer', (peerId: string, sdp: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onAnswer?.(peerId, sdp);
     });
 
-    this.connection.on('OnIceCandidate', (peerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null) => {
+    connection.on('OnIceCandidate', (peerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null) => {
+      if (!isCurrentConnection()) return;
       this.events.onIceCandidate?.(peerId, candidate, sdpMid, sdpMLineIndex);
     });
 
-    this.connection.on('OnPublicKey', (peerId: string, keyJwk: string) => {
+    connection.on('OnPublicKey', (peerId: string, keyJwk: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onPublicKey?.(peerId, keyJwk);
     });
 
-    this.connection.on('OnSignature', (peerId: string, signature: string, challenge: string) => {
+    connection.on('OnSignature', (peerId: string, signature: string, challenge: string) => {
+      if (!isCurrentConnection()) return;
       this.events.onSignature?.(peerId, signature, challenge);
     });
 
     // Session control events
-    this.connection.on('OnSessionLocked', () => {
+    connection.on('OnSessionLocked', () => {
+      if (!isCurrentConnection()) return;
       this.events.onSessionLocked?.();
     });
 
-    this.connection.on('OnSessionUnlocked', () => {
+    connection.on('OnSessionUnlocked', () => {
+      if (!isCurrentConnection()) return;
       this.events.onSessionUnlocked?.();
     });
 
-    this.connection.on('OnKicked', () => {
+    connection.on('OnKicked', () => {
+      if (!isCurrentConnection()) return;
       this.events.onKicked?.();
     });
 
-    this.connection.on('OnHostOnlySendingEnabled', () => {
+    connection.on('OnHostOnlySendingEnabled', () => {
+      if (!isCurrentConnection()) return;
       this.events.onHostOnlySendingEnabled?.();
     });
 
-    this.connection.on('OnHostOnlySendingDisabled', () => {
+    connection.on('OnHostOnlySendingDisabled', () => {
+      if (!isCurrentConnection()) return;
       this.events.onHostOnlySendingDisabled?.();
     });
 
-    await this.connection.start();
+    connection.on('OnHostConnectionChanged', (hostConnectionId: string | null) => {
+      if (!isCurrentConnection()) return;
+      this.events.onHostConnectionChanged?.(hostConnectionId);
+    });
+
+    connection.onreconnecting((error) => {
+      if (!isCurrentConnection()) return;
+      this.events.onReconnecting?.(error ?? null);
+    });
+
+    connection.onreconnected((connectionId) => {
+      if (!isCurrentConnection()) return;
+      this.events.onReconnected?.(connectionId ?? null);
+    });
+
+    connection.onclose((error) => {
+      if (!isCurrentConnection()) return;
+      this.events.onClosed?.(error ?? null);
+    });
+
+    try {
+      await connection.start();
+      if (!isCurrentConnection()) await connection.stop();
+    } catch (error) {
+      if (isCurrentConnection()) this.connection = null;
+      throw error;
+    }
   }
 
   async disconnect(): Promise<void> {
-    if (this.connection) {
-      await this.connection.stop();
-      this.connection = null;
-    }
+    const connection = this.connection;
+    if (!connection) return;
+    // Detach first. A new room may call connect() while this stop is still
+    // awaiting transport shutdown; the old stop must never null out the new
+    // HubConnection afterward.
+    this.connection = null;
+    await connection.stop();
   }
 
   /**
@@ -116,7 +163,8 @@ export class SignalingService {
     isInitiator?: boolean; 
     existingPeers?: string[]; 
     isHost?: boolean;
-    hostConnectionId?: string;
+    hostConnectionId?: string | null;
+    maxPeers?: number;
     isLocked?: boolean;
     isHostOnlySending?: boolean;
     error?: string 
