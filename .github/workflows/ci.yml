@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: client
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -33,7 +33,7 @@ jobs:
       run:
         working-directory: server/Sendie.Server.Tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
@@ -44,6 +44,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [client, server]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build --tag sendie-client:ci client
       - run: docker build --tag sendie-server:ci server/Sendie.Server
